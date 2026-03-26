@@ -1,0 +1,26 @@
+torch>=2.0.0
+pyyaml>=6.0
+numpy>=1.24.0
+huggingface_hub>=0.20.0
+safetensors>=0.4.0
+
+# ── Required for real training ────────────────────────────────────────────
+# datasets and transformers are used for:
+#   - pretokenize.py (tokenize once, store on Hub)
+#   - PackedDataset.from_hf() fallback
+#   - HF Trainer path (--trainer hf)
+# Colab already has these installed, so usually no action needed.
+datasets>=2.18.0
+transformers>=4.40.0
+
+# ── Performance (optional but recommended) ───────────────────────────────
+# Flash Attention 2 — ~1.5-2× faster attention on CUDA with fp16/bf16
+# Requires a CUDA environment to build. Skip on CPU-only machines.
+# flash-attn>=2.5.0  # uncomment after: pip install flash-attn --no-build-isolation
+
+# ── HF ecosystem (optional) ──────────────────────────────────────────────
+# accelerate>=0.27.0   # for --trainer hf with multi-GPU / FSDP / DeepSpeed
+# peft>=0.10.0         # for LoRA / QLoRA fine-tuning
+# bitsandbytes>=0.43.0 # for int4/int8 quantisation (QLoRA)
+# evaluate>=0.4.0      # for perplexity and other metrics
+# wandb                # for W&B logging (set report_to: ["wandb"] in TrainingArguments)

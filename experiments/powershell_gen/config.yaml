@@ -1,0 +1,37 @@
+experiment:
+  name: "powershell_gen_85m"
+  hub:
+    repo_id: "powershell_gen_85m"
+    push_every: 500
+    private: true
+
+model:
+  vocab_size: 50257
+  hidden_size: 512
+  num_layers: 16
+  max_seq_len: 1024
+  tie_word_embeddings: true
+  attention:
+    type: "gqa"
+    num_heads: 8
+    num_kv_heads: 2
+  positional:
+    type: "rope"
+    theta: 10000.0
+  ffn:
+    type: "swiglu"
+    intermediate_size: 1536
+  norm:
+    type: "rms"
+
+training:
+  max_steps: 30000
+  batch_size: 16
+  grad_accum: 4
+  lr: 5.0e-4
+  weight_decay: 0.1
+  warmup_ratio: 0.05
+  dtype: "bfloat16"
+  save_every: 500
+  eval_every: 500
+  data_hub_repo: "powershell-tokenized"

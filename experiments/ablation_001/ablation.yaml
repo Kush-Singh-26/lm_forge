@@ -1,0 +1,70 @@
+# experiments/ablation_001/ablation.yaml
+#
+# Sweep: compare all PE types with GQA attention.
+# Runs 4 experiments sequentially, produces a ranked results table.
+#
+# Usage:
+#   python experiments/ablation_001/run_ablation.py
+#
+# Results written to experiments/ablation_001/ablation_results.json
+
+base: experiments/exp_001_gqa_rope/config.yaml
+
+sweep:
+  - name: "gqa_rope"
+    model:
+      attention: {type: gqa, num_kv_heads: 2}
+      positional: {type: rope}
+    training:
+      max_steps: 200
+
+  - name: "gqa_alibi"
+    model:
+      attention: {type: gqa, num_kv_heads: 2}
+      positional: {type: alibi}
+    training:
+      max_steps: 200
+
+  - name: "gqa_learned"
+    model:
+      attention: {type: gqa, num_kv_heads: 2}
+      positional: {type: learned}
+    training:
+      max_steps: 200
+
+  - name: "gqa_nope"
+    model:
+      attention: {type: gqa, num_kv_heads: 2}
+      positional: {type: none}
+    training:
+      max_steps: 200
+
+  - name: "mha_rope"
+    model:
+      attention: {type: mha, num_kv_heads: 8}
+      positional: {type: rope}
+    training:
+      max_steps: 200
+
+  - name: "mqa_rope"
+    model:
+      attention: {type: mqa, num_kv_heads: 1}
+      positional: {type: rope}
+    training:
+      max_steps: 200
+
+  - name: "gqa_rope_geglu"
+    model:
+      attention: {type: gqa, num_kv_heads: 2}
+      positional: {type: rope}
+      ffn: {type: geglu}
+    training:
+      max_steps: 200
+
+  - name: "gqa_rope_classic_ffn"
+    model:
+      attention: {type: gqa, num_kv_heads: 2}
+      positional: {type: rope}
+      ffn: {type: classic}
+    training:
+      max_steps: 200

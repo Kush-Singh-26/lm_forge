@@ -1,0 +1,82 @@
+# experiments/pretrain_base/config_phase1.yaml
+#
+# Phase 1: Pretrain on fineweb-edu (general knowledge & reasoning)
+# Target: ~10B tokens, ~38,000 steps
+#
+# Usage:
+#   python experiments/pretrain_base/train.py --phase 1
+#   python experiments/pretrain_base/train.py --phase 1 --t4        # T4 override
+#   python experiments/pretrain_base/train.py --phase 1 --smoke     # CPU smoke test
+
+experiment:
+  name: "pretrain_phase1"
+
+model:
+  vocab_size: 49152          # SmolLM tokenizer (trained on FineWeb-edu + code mix)
+  hidden_size: 512
+  num_layers: 16
+  max_seq_len: 1024
+  tie_word_embeddings: true
+
+  attention:
+    type: "gqa"
+    num_heads: 8
+    num_kv_heads: 2
+    dropout: 0.0
+
+  positional:
+    type: "rope"
+    theta: 10000.0
+
+  ffn:
+    type: "swiglu"
+    intermediate_size: 1536
+    dropout: 0.0
+    bias: false
+
+  norm:
+    type: "rms"
+    eps: 1.0e-5
+
+  initializer_range: 0.02
+
+training:
+  max_steps: 38000
+  batch_size: 32
+  grad_accum: 8
+  seq_len: 1024
+  lr: 3.0e-4
+  weight_decay: 0.1
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  dtype: "bfloat16"
+  backend: "auto"
+  log_every: 10
+  eval_every: 1000
+  save_every: 1000
+  compile: false
+  fused_adamw: true
+  num_workers: -1
+  pin_memory: true
+
+  # HF-specific overrides
+  hf_args:
+    report_to: ["none"]
+    run_name: "pretrain_phase1"
+    save_total_limit: 5
+    load_best_model_at_end: false
+    optim: "adamw_torch_fused"
+    lr_scheduler_type: "cosine"
+    warmup_steps: 2000
+    dataloader_drop_last: true
+    gradient_checkpointing: true
+
+  # Data
+  data_hub_repo: ""
+  data_dir: ""
+
+# Hub (set your repo to push checkpoints)
+hub:
+  repo_id: ""
+  push_every: 0
+  private: true

@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.*
+
+# Testing
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+*.cover
+coverage.xml
+
+# Linting / formatting
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# UV / pip
+__pypackages__/
+
+# Python version
+.python-version
+
+# ML training artifacts
+checkpoints/
+wandb/
+runs/
+outputs/
+*.pt
+*.ckpt
+*.safetensors
+*.bin
+
+# Tensorboard
+tb_logs/
+tensorboard_logs/
+events.out.tfevents.*
+
+# Colab
+.ipynb_checkpoints/
+
+# Lock files (optional — commit uv.lock if you want reproducible installs)
+=0.26.0
