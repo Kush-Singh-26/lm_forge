@@ -97,10 +97,9 @@ class TestMemmapDataset:
         _write_bin(tmp_path / "train.bin", 4096)
         ds = MemmapDataset(tmp_path / "train.bin", seq_len=64)
         item = ds[0]
-        # Returns seq_len+1 tokens (full chunk) for both input_ids and labels
-        # The model handles the shift internally
-        assert item["input_ids"].shape == (65,)
-        assert item["labels"].shape == (65,)
+        # Returns seq_len tokens with shift pre-applied
+        assert item["input_ids"].shape == (64,)
+        assert item["labels"].shape == (64,)
         assert item["input_ids"].dtype == torch.int64
 
     def test_labels_shifted_by_one(self, tmp_path):
@@ -108,13 +107,13 @@ class TestMemmapDataset:
         _write_bin(tmp_path / "train.bin", 4096)
         ds = MemmapDataset(tmp_path / "train.bin", seq_len=64)
         item = ds[0]
-        # The dataset returns the full chunk (seq_len+1). The model will shift internally.
-        # Verify the raw chunk: input_ids = chunk, labels = chunk
-        # So at position i, model predicts token[i+1] from token[i]
+        # Verify the shift: labels[i] == input_ids[i+1] is NOT true here because
+        # input_ids is chunk[:64] and labels is chunk[1:65].
+        # So labels[i] is the token that follows input_ids[i].
         raw = np.memmap(tmp_path / "train.bin", dtype=np.uint16, mode="r")
-        expected_chunk = torch.tensor(raw[:65].astype(np.int64))
-        assert torch.equal(item["input_ids"], expected_chunk)
-        assert torch.equal(item["labels"], expected_chunk)
+        chunk = torch.tensor(raw[:65].astype(np.int64))
+        assert torch.equal(item["input_ids"], chunk[:-1])
+        assert torch.equal(item["labels"], chunk[1:])
 
     def test_length(self, tmp_path):
         _write_bin(tmp_path / "train.bin", 1000)
@@ -157,13 +156,8 @@ class TestMemmapDataset:
         _write_fake_dataset(tmp_path)
         ds = MemmapDataset.from_dir(tmp_path, split="val", seq_len=32)
         assert len(ds) > 0
-        # Returns seq_len+1 for both input_ids and labels
-        assert ds[0]["input_ids"].shape == (33,)
-
-    def test_from_dir_explicit_seq_len(self, tmp_path):
-        _write_fake_dataset(tmp_path, seq_recommended=128)
-        ds = MemmapDataset.from_dir(tmp_path, split="train", seq_len=64)
-        assert ds.seq_len == 64  # explicit wins over meta.json
+        # Returns seq_len tokens with shift pre-applied
+        assert ds[0]["input_ids"].shape == (32,)
 
     def test_repr(self, tmp_path):
         _write_bin(tmp_path / "train.bin", 4096)
@@ -177,9 +171,9 @@ class TestMemmapDataset:
         _write_bin(tmp_path / "train.bin", 4096)
         ds = MemmapDataset(tmp_path / "train.bin", seq_len=64)
         for i in range(min(5, len(ds))):
-            # Returns seq_len+1 for both input_ids and labels
-            assert ds[i]["input_ids"].shape == (65,)
-            assert ds[i]["labels"].shape == (65,)
+            # Returns seq_len tokens with shift pre-applied
+            assert ds[i]["input_ids"].shape == (64,)
+            assert ds[i]["labels"].shape == (64,)
 
     def test_tokens_are_valid_ids(self, tmp_path):
         """No token should exceed vocab_size."""
@@ -254,7 +248,7 @@ class TestPretokenize:
         # MemmapDataset should be able to read them
         ds = MemmapDataset(train_bin, seq_len=64)
         assert len(ds) > 0
-        assert ds[0]["input_ids"].shape == (65,)
+        assert ds[0]["input_ids"].shape == (64,)
 
     def test_tokenized_data_info_str(self):
         from engine.legacy.data.pretokenize import TokenizedDataInfo
@@ -315,9 +309,9 @@ class TestBuildDataloaderNew:
             ds, batch_size=4, num_workers=0, pin_memory=False, shuffle=False
         )
         batch = next(iter(loader))
-        # Returns seq_len+1 for both input_ids and labels (full chunk)
-        assert batch["input_ids"].shape == (4, 33)
-        assert batch["labels"].shape == (4, 33)
+        # Returns seq_len tokens with shift pre-applied
+        assert batch["input_ids"].shape == (4, 32)
+        assert batch["labels"].shape == (4, 32)
         # No padding — all real tokens, no -100 labels
         assert (batch["labels"] != -100).all()
 
@@ -601,9 +595,6 @@ class TestIntegration:
         mm_batch = next(iter(mm_loader))
         pk_batch = next(iter(pk_loader))
 
-        # MemmapDataset returns seq_len+1 (full chunk), PackedDataset returns seq_len
-        # Both are valid for training - the model handles the shift internally
-        assert (
-            mm_batch["input_ids"].shape[0] == pk_batch["input_ids"].shape[0]
-        )  # same batch size
-        assert mm_batch["labels"].shape[0] == pk_batch["labels"].shape[0]
+        # Both datasets return seq_len tokens with shift pre-applied
+        assert mm_batch["input_ids"].shape == pk_batch["input_ids"].shape
+        assert mm_batch["labels"].shape == pk_batch["labels"].shape

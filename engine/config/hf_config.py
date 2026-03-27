@@ -60,7 +60,7 @@ try:
             # ── shape ──────────────────────────────────────────────────
             vocab_size: int = 32_000,
             hidden_size: int = 512,
-            num_layers: int = 6,
+            num_hidden_layers: int = 6,
             max_seq_len: int = 2048,
             # ── attention ──────────────────────────────────────────────
             attention__type: str = "gqa",
@@ -68,6 +68,7 @@ try:
             attention__num_kv_heads: int = 8,
             attention__dropout: float = 0.0,
             attention__window_size: int = 512,
+            attention__flash_attn: bool = False,
             # ── positional ─────────────────────────────────────────────
             positional__type: str = "rope",
             positional__theta: float = 10_000.0,
@@ -97,7 +98,7 @@ try:
             # shape
             self.vocab_size = vocab_size
             self.hidden_size = hidden_size
-            self.num_layers = num_layers
+            self.num_hidden_layers = num_hidden_layers
             self.max_seq_len = max_seq_len
             self.initializer_range = initializer_range
 
@@ -107,6 +108,7 @@ try:
             self.attention__num_kv_heads = attention__num_kv_heads
             self.attention__dropout = attention__dropout
             self.attention__window_size = attention__window_size
+            self.attention__flash_attn = attention__flash_attn
 
             # positional
             self.positional__type = positional__type
@@ -124,7 +126,6 @@ try:
             self.norm__eps = norm__eps
 
             # HF standard aliases for generation compatibility
-            self.num_hidden_layers = num_layers
             self.num_attention_heads = attention__num_heads
             self.intermediate_size = ffn__intermediate_size
 
@@ -136,7 +137,7 @@ try:
             return cls(
                 vocab_size=cfg.vocab_size,
                 hidden_size=cfg.hidden_size,
-                num_layers=cfg.num_layers,
+                num_hidden_layers=cfg.num_layers,
                 max_seq_len=cfg.max_seq_len,
                 initializer_range=cfg.initializer_range,
                 tie_word_embeddings=cfg.tie_word_embeddings,
@@ -145,6 +146,7 @@ try:
                 attention__num_kv_heads=cfg.attention.num_kv_heads,
                 attention__dropout=cfg.attention.dropout,
                 attention__window_size=cfg.attention.window_size,
+                attention__flash_attn=cfg.attention.flash_attn,
                 positional__type=cfg.positional.type,
                 positional__theta=cfg.positional.theta,
                 positional__max_seq_len=cfg.positional.max_seq_len,
@@ -161,7 +163,7 @@ try:
             return ModelConfig(
                 vocab_size=self.vocab_size,
                 hidden_size=self.hidden_size,
-                num_layers=self.num_layers,
+                num_layers=self.num_hidden_layers,
                 max_seq_len=self.max_seq_len,
                 initializer_range=self.initializer_range,
                 tie_word_embeddings=self.tie_word_embeddings,
@@ -171,6 +173,7 @@ try:
                     num_kv_heads=self.attention__num_kv_heads,
                     dropout=self.attention__dropout,
                     window_size=self.attention__window_size,
+                    flash_attn=self.attention__flash_attn,
                 ),
                 positional=PositionalConfig(
                     type=self.positional__type,

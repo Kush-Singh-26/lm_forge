@@ -128,6 +128,8 @@ class GroupedQueryAttention(BaseAttention):
         attn_mask = attention_mask
         if pe_out.attn_bias is not None:
             bias = pe_out.attn_bias.to(q.dtype)
+            kv_len = k_expanded.shape[2]
+            bias = bias[:, :, -S:, -kv_len:]
             attn_mask = (attn_mask + bias) if attn_mask is not None else bias
 
         # ── Attention kernel — Flash2 if available, else PyTorch SDPA ────
@@ -144,7 +146,7 @@ class GroupedQueryAttention(BaseAttention):
                 k_fa,
                 v_fa,
                 dropout_p=self.dropout if self.training else 0.0,
-                causal=True,
+                causal=(attn_mask is None),
                 softmax_scale=self.scale,
             )
             out = out.reshape(B, S, -1)

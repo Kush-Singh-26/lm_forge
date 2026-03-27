@@ -10,7 +10,7 @@ Pretrain an 85M parameter decoder-only transformer on two datasets sequentially,
 | Phase 2 | `bigcode/the-stack-v2` | ~5–10B | Code syntax, variables, loops, script patterns |
 | Phase 3 | PS1 corpus (separate experiment) | fine-tune | PowerShell generation |
 
-**Model:** 16 layers, hidden 512, GQA (8Q/2KV), RoPE, SwiGLU, RMSNorm, GPT-2 tokenizer (50,257 vocab).
+**Model:** 16 layers, hidden 512, GQA (8Q/2KV), RoPE, SwiGLU, RMSNorm, SmolLM tokenizer (49,152 vocab).
 
 ---
 
@@ -194,7 +194,7 @@ checkpoints/pretrain_phase1/checkpoint-1000/
 ├── scheduler.pt               # cosine schedule + step count
 ├── trainer_state.json         # global_step, logging history
 ├── config.json                # model architecture config
-├── tokenizer.json             # GPT-2 tokenizer
+├── tokenizer.json             # SmolLM tokenizer
 ├── tokenizer_config.json
 ├── generation_config.json
 └── rng_states.pth             # RNG states for reproducibility

@@ -87,7 +87,7 @@ from engine.models import HFCausalLM
 HFCausalLM.register()
 
 # Load from Hub
-model = HFCausalLM.from_pretrained("{hub_repo_id}")
+{repo_code_str}
 
 # Inference
 import torch
@@ -209,7 +209,12 @@ def generate_model_card(
     if extra_notes:
         arch_notes += f"\n\n{extra_notes}"
 
-    hub_repo = exp.hub.repo_id or f"{github_user}/{exp.name}"
+    if not exp.hub.repo_id:
+        hub_repo = f"{github_user}/{exp.name}"
+        repo_code_str = f'# TODO: set hub.repo_id in config.yaml\nmodel = HFCausalLM.from_pretrained("{hub_repo}")'
+    else:
+        hub_repo = exp.hub.repo_id
+        repo_code_str = f'model = HFCausalLM.from_pretrained("{hub_repo}")'
 
     card = _CARD_TEMPLATE.format(
         model_name=exp.name,
@@ -237,6 +242,7 @@ def generate_model_card(
         dtype=t.dtype,
         train_date=datetime.now().strftime("%Y-%m-%d"),
         eval_section=eval_section,
+        repo_code_str=repo_code_str,
         hub_repo_id=hub_repo,
         arch_notes=arch_notes,
         citation_key=exp.name.replace("-", "_"),
@@ -259,7 +265,7 @@ def _estimate_params(m) -> int:
     ffn_h = m.ffn.intermediate_size
     q_heads = m.attention.num_heads
     kv_heads = m.attention.num_kv_heads
-    head_d = h // q_heads
+    head_d = m.head_dim
 
     embed = v * h
     q_proj = h * (q_heads * head_d)

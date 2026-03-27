@@ -135,7 +135,7 @@ class DeviceManager:
             if not param.requires_grad:
                 continue
             # Skip 1-D params (norms, biases) and embedding tables
-            if param.ndim <= 1 or any(nd in name for nd in ["norm", "embed", "bias"]):
+            if param.ndim == 1 or "embed_tokens" in name:
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)

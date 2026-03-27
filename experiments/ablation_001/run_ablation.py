@@ -34,7 +34,8 @@ from engine.utils import AblationRunner
 
 class SyntheticDataset(Dataset):
     def __init__(self, vocab_size, seq_len, n=500):
-        self.data = torch.randint(0, vocab_size, (n, seq_len))
+        gen = torch.Generator().manual_seed(42)
+        self.data = torch.randint(0, vocab_size, (n, seq_len), generator=gen)
 
     def __len__(self):
         return len(self.data)

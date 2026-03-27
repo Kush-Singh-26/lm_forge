@@ -40,6 +40,7 @@ def apply_rope(
         cos  : (1, 1, S, head_dim)
         sin  : (1, 1, S, head_dim)
     """
+
     def _rot(x: torch.Tensor) -> torch.Tensor:
         half = x.shape[-1] // 2
         x1, x2 = x[..., :half], x[..., half:]
@@ -60,13 +61,13 @@ class RoPE(nn.Module):
     def __init__(
         self,
         config: PositionalConfig,
-        hidden_size: int = 0,   # unused; kept for uniform factory signature
+        hidden_size: int = 0,  # unused; kept for uniform factory signature
         num_heads: int = 0,
         head_dim: int = 0,
     ) -> None:
         super().__init__()
         self.theta = config.theta
-        self._head_dim: int = head_dim   # set by model after construction
+        self._head_dim: int = head_dim  # set by model after construction
         self._cached_len: int = 0
         self.register_buffer("_cos", torch.empty(0), persistent=False)
         self.register_buffer("_sin", torch.empty(0), persistent=False)
@@ -74,18 +75,21 @@ class RoPE(nn.Module):
     def set_head_dim(self, head_dim: int) -> None:
         """Called by the model after it knows head_dim."""
         self._head_dim = head_dim
-        self._build(2048)   # build initial cache
+        self._build(2048)  # build initial cache
 
-    def _build(self, seq_len: int) -> None:
+    def _build(self, seq_len: int, device: Optional[torch.device] = None) -> None:
+        if device is None:
+            device = torch.device("cpu")
         inv_freq = 1.0 / (
-            self.theta ** (
-                torch.arange(0, self._head_dim, 2, dtype=torch.float32)
+            self.theta
+            ** (
+                torch.arange(0, self._head_dim, 2, dtype=torch.float32, device=device)
                 / self._head_dim
             )
         )
-        t = torch.arange(seq_len, dtype=torch.float32)
-        freqs = torch.outer(t, inv_freq)           # (S, D/2)
-        emb = torch.cat([freqs, freqs], dim=-1)    # (S, D)
+        t = torch.arange(seq_len, dtype=torch.float32, device=device)
+        freqs = torch.outer(t, inv_freq)  # (S, D/2)
+        emb = torch.cat([freqs, freqs], dim=-1)  # (S, D)
         self._cos = emb.cos().unsqueeze(0).unsqueeze(0)  # (1,1,S,D)
         self._sin = emb.sin().unsqueeze(0).unsqueeze(0)
         self._cached_len = seq_len
@@ -96,14 +100,14 @@ class RoPE(nn.Module):
         seq_len: int,
         position_ids: Optional[torch.Tensor] = None,
     ) -> PEOutput:
-        if seq_len > self._cached_len:
-            self._build(seq_len * 2)
+        if seq_len > self._cached_len or self._cos.device != hidden_states.device:
+            self._build(max(seq_len * 2, 2048), device=hidden_states.device)
 
         if position_ids is None:
-            cos = self._cos[:, :, :seq_len].to(hidden_states.device)
-            sin = self._sin[:, :, :seq_len].to(hidden_states.device)
+            cos = self._cos[:, :, :seq_len]
+            sin = self._sin[:, :, :seq_len]
         else:
-            cos = self._cos[0, 0][position_ids].unsqueeze(1).to(hidden_states.device)
-            sin = self._sin[0, 0][position_ids].unsqueeze(1).to(hidden_states.device)
+            cos = self._cos[0, 0][position_ids].unsqueeze(1)
+            sin = self._sin[0, 0][position_ids].unsqueeze(1)
 
         return PEOutput(cos=cos, sin=sin)

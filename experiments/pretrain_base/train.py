@@ -43,6 +43,7 @@ from pathlib import Path
 
 # ── Path setup ──────────────────────────────────────────────────────────────
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import torch
 from transformers import (
@@ -222,11 +223,14 @@ def main():
         exp.model.attention.num_heads = 2
         exp.model.attention.num_kv_heads = 2
         exp.model.ffn.intermediate_size = 128
-        exp.model.tie_word_embeddings = False
         exp.training.seq_len = 64
         exp.training.batch_size = 2
     if args.steps:
         exp.training.max_steps = args.steps
+
+    # Re-validate after any overrides are applied
+    exp.model.__post_init__()
+    exp.validate()
 
     # 2. Print config summary
     phase_name = "fineweb-edu" if args.phase == 1 else "the-stack-v2"
@@ -254,6 +258,7 @@ def main():
 
     # 4. Model
     print("Building model...")
+    torch.manual_seed(42)
     HFCausalLM.register()
 
     if args.resume and not args.smoke:
@@ -266,8 +271,6 @@ def main():
         hf_cfg.use_cache = False
         model = HFCausalLM(hf_cfg)
 
-    if not args.smoke:
-        model.lm.model.enable_gradient_checkpointing()
     n_params = model.num_parameters()
     print(f"Model parameters: {n_params:,} ({n_params / 1e6:.1f}M)")
 
@@ -284,6 +287,9 @@ def main():
 
     # 6. Training Arguments
     output_dir = f"checkpoints/{exp.name}"
+
+    from engine.data import default_num_workers
+    workers = exp.training.num_workers if exp.training.num_workers >= 0 else default_num_workers()
 
     training_args_dict = dict(
         output_dir=output_dir,
@@ -305,7 +311,7 @@ def main():
         hub_private_repo=exp.hub.private,
         report_to=["none"],
         torch_compile=exp.training.compile,
-        dataloader_num_workers=max(0, exp.training.num_workers),
+        dataloader_num_workers=workers,
     )
 
     # Add eval config if we have eval data
@@ -318,31 +324,48 @@ def main():
         # Streaming mode — no eval
         training_args_dict["eval_strategy"] = "no"
 
-    # Merge YAML hf_args overrides
+    # Merge YAML hf_args overrides safely
     if exp.training.hf_args:
-        training_args_dict.update(exp.training.hf_args)
+        for k, v in exp.training.hf_args.items():
+            if k in training_args_dict and training_args_dict[k] != v:
+                print(f"[config] Overriding {k}: {training_args_dict[k]} -> {v}")
+            training_args_dict[k] = v
+
+    # Resolve warmup_ratio vs warmup_steps conflict
+    if "warmup_steps" in training_args_dict and training_args_dict["warmup_steps"] > 0:
+        training_args_dict.pop("warmup_ratio", None)
 
     training_args = TrainingArguments(**training_args_dict)
 
     # 7. Trainer
     callbacks = []
     if not args.smoke:
-        callbacks.append(ProfilingCallback())
+        callbacks.append(ProfilingCallback(seq_len=exp.training.seq_len))
 
-    hf_trainer = HFTrainer(
+    # Use processing_class (transformers >= 4.46) with tokenizer fallback
+    trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
-        processing_class=tokenizer,
         callbacks=callbacks,
     )
+    try:
+        # transformers >= 4.46
+        hf_trainer = HFTrainer(processing_class=tokenizer, **trainer_kwargs)
+    except TypeError:
+        # transformers < 4.46
+        hf_trainer = HFTrainer(tokenizer=tokenizer, **trainer_kwargs)
 
     # 8. Resume from checkpoint
     resume_from = None
     if args.resume and Path(args.resume).exists():
-        resume_from = args.resume
-        print(f"\nResuming training from: {resume_from}")
+        # Only resume Trainer state if it's a real checkpoint (not just saved weights)
+        if (Path(args.resume) / "trainer_state.json").exists():
+            resume_from = args.resume
+            print(f"\nResuming Trainer state from: {resume_from}")
+        else:
+            print(f"\nLoaded weights from {args.resume}, starting new Trainer state.")
     elif args.resume:
         print(f"\nWARNING: Checkpoint not found: {args.resume}")
         print("Starting from scratch.\n")

@@ -10,7 +10,7 @@ from engine.data.collators import CLMCollator, MLMCollator
 from engine.data.hf_utils import prepare_dataset
 
 
-def _default_num_workers() -> int:
+def default_num_workers() -> int:
     """
     Sensible num_workers default:
       - 0 on Windows (fork not supported)
@@ -32,6 +32,10 @@ def _default_num_workers() -> int:
     return 4
 
 
+# Backward-compat alias
+_default_num_workers = default_num_workers
+
+
 def build_dataloader(
     dataset: Dataset | IterableDataset,
     batch_size: int,
@@ -50,7 +54,18 @@ def build_dataloader(
 
     # ── Workers ──────────────────────────────────────────────────────────────
     if num_workers is None:
-        num_workers = _default_num_workers()
+        num_workers = default_num_workers()
+
+    # Force num_workers=0 for IterableDataset to avoid fork-safety issues
+    # with HuggingFace fast tokenizers (Rust-backed memory is not fork-safe).
+    if is_iterable and num_workers > 0:
+        import warnings
+
+        warnings.warn(
+            "IterableDataset with num_workers > 0 is not safe with HuggingFace "
+            "fast tokenizers (fork-safety deadlock risk). Forcing num_workers=0."
+        )
+        num_workers = 0
 
     # ── Pin memory ───────────────────────────────────────────────────────────
     if pin_memory is None:
@@ -81,4 +96,5 @@ __all__ = [
     "MLMCollator",
     "build_dataloader",
     "prepare_dataset",
+    "default_num_workers",
 ]

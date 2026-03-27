@@ -63,8 +63,18 @@ class AttentionConfig:
 
     def __post_init__(self):
         if self.type == "mqa":
+            if getattr(self, "num_kv_heads", 1) != 1:
+                import logging
+                logging.getLogger("lm_forge").warning(
+                    f"Attention type is 'mqa', forcing num_kv_heads=1 (was {self.num_kv_heads})"
+                )
             self.num_kv_heads = 1
         if self.type == "mha":
+            if getattr(self, "num_kv_heads", self.num_heads) != self.num_heads:
+                import logging
+                logging.getLogger("lm_forge").warning(
+                    f"Attention type is 'mha', forcing num_kv_heads={self.num_heads} (was {self.num_kv_heads})"
+                )
             self.num_kv_heads = self.num_heads
         assert self.num_heads % self.num_kv_heads == 0, (
             f"num_heads ({self.num_heads}) must be divisible by "
@@ -175,6 +185,10 @@ class TrainConfig:
     # HF Hub dataset repo to pull from if data_dir files are missing.
     data_hub_repo: str = ""
 
+    def __post_init__(self):
+        if isinstance(self.betas, list):
+            self.betas = tuple(self.betas)
+
     @property
     def warmup_steps(self) -> int:
         return max(1, int(self.max_steps * self.warmup_ratio))
@@ -199,6 +213,43 @@ class ExperimentConfig:
     training: TrainConfig = field(default_factory=TrainConfig)
     hub: HubConfig = field(default_factory=HubConfig)
 
+    def validate(self) -> None:
+        m = self.model
+        t = self.training
+        
+        import logging
+        logger = logging.getLogger("lm_forge")
+
+        if m.positional.type == "alibi" and m.attention.flash_attn:
+            logger.warning(
+                "Flash Attention 2 does not support ALiBi biases. "
+                "Will silently fall back to PyTorch SDPA slower kernels!"
+            )
+        
+        if m.attention.type == "sliding" and m.attention.flash_attn:
+            logger.warning(
+                "Sliding window attention currently does not use Flash Attention in this implementation. "
+                "flash_attn=True will be ignored."
+            )
+
+        if m.num_layers < 1:
+            raise ValueError("num_layers must be >= 1")
+        if m.vocab_size < 1:
+            raise ValueError("vocab_size must be >= 1")
+        if t.lr <= 0:
+            raise ValueError("lr must be > 0")
+        if t.batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        if t.seq_len < 1:
+            raise ValueError("seq_len must be >= 1")
+        if m.ffn.intermediate_size <= 0:
+            raise ValueError("intermediate_size must be > 0")
+        if t.seq_len > m.max_seq_len:
+            raise ValueError(
+                f"training.seq_len ({t.seq_len}) exceeds model.max_seq_len "
+                f"({m.max_seq_len}). Increase max_seq_len or reduce seq_len."
+            )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Loader
@@ -211,10 +262,12 @@ def _merge(dataclass_instance, overrides: dict) -> None:
     Unknown keys are silently ignored so future YAML fields don't break old
     engine versions.
     """
+    import warnings
     fields = {f.name: f for f in dataclass_instance.__dataclass_fields__.values()}  # type: ignore[attr-defined]
 
     for key, value in overrides.items():
         if key not in fields:
+            warnings.warn(f"Unrecognised config key: '{key}' in {dataclass_instance.__class__.__name__}")
             continue
         current = getattr(dataclass_instance, key)
         if hasattr(current, "__dataclass_fields__") and isinstance(value, dict):
@@ -224,10 +277,7 @@ def _merge(dataclass_instance, overrides: dict) -> None:
 
     # Re-run __post_init__ if present to recompute derived fields
     if hasattr(dataclass_instance, "__post_init__"):
-        try:
-            dataclass_instance.__post_init__()
-        except Exception:
-            pass  # best-effort
+        dataclass_instance.__post_init__()
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
@@ -243,6 +293,7 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     if "experiment" in raw:
         exp_raw = dict(raw["experiment"])
         cfg.name = exp_raw.pop("name", cfg.name)
+        # Still support the old fallback in case people put hub under experiment
         if "hub" in exp_raw:
             _merge(cfg.hub, exp_raw["hub"])
 
@@ -252,4 +303,8 @@ def load_experiment_config(path: str | Path) -> ExperimentConfig:
     if "training" in raw:
         _merge(cfg.training, raw["training"])
 
+    if "hub" in raw:
+        _merge(cfg.hub, raw["hub"])
+
+    cfg.validate()
     return cfg

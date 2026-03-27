@@ -15,7 +15,7 @@ def prepare_dataset(
     tokenizer,
     seq_len: int,
     text_column: str = "text",
-    num_proc: int = 4,
+    num_proc: Optional[int] = None,
     shuffle: bool = True,
     seed: int = 42,
 ):
@@ -25,15 +25,15 @@ def prepare_dataset(
     This uses the 'concatenate and chunk' strategy which is the standard
     way to train causal language models efficiently.
     """
-    # Check if tokenizer accepts add_special_tokens
-    sig = inspect.signature(tokenizer)
-    supports_special_tokens = "add_special_tokens" in sig.parameters
-
+    if num_proc is None:
+        import os
+        num_proc = min(4, os.cpu_count() or 1)
     def tokenize_function(examples):
         texts = examples[text_column]
-        if supports_special_tokens:
+        try:
             return tokenizer(texts, add_special_tokens=False)
-        return tokenizer(texts)
+        except TypeError:
+            return tokenizer(texts)
 
     # 1. Tokenize
     tokenized_ds = dataset.map(

@@ -10,6 +10,7 @@ import time
 from typing import Optional
 
 try:
+    import torch
     from transformers import (
         TrainerCallback,
         TrainingArguments,
@@ -22,12 +23,16 @@ try:
         """
         HF Trainer Callback that tracks MFU, throughput, and memory.
         Results are logged to the Trainer's log_history and printed to console.
+
+        Timing: measures wall-clock between consecutive on_step_end calls,
+        which fires once per optimizer step (after all grad_accum micro-batches).
         """
 
-        def __init__(self, warmup_steps: int = 5):
+        def __init__(self, warmup_steps: int = 5, seq_len: Optional[int] = None):
             self.warmup_steps = warmup_steps
+            self.seq_len_override = seq_len
             self.profiler: Optional[Profiler] = None
-            self._step_start_time = 0.0
+            self._prev_step_end_time: Optional[float] = None
 
         def on_train_begin(
             self,
@@ -41,13 +46,14 @@ try:
                 return
 
             # Initialize profiler using Trainer's config
-            # We use effective_batch_size because HFTrainer handles grad_accum
+            # We use effective_batch_size because on_step_end fires once per
+            # optimizer step (after all grad_accum micro-batches).
             batch_size = (
                 args.per_device_train_batch_size * args.gradient_accumulation_steps
             )
 
-            # Try to find seq_len in model config or args
-            seq_len = getattr(model.config, "max_seq_len", 512)
+            # Try to find seq_len in override, model config, or fallback
+            seq_len = self.seq_len_override if self.seq_len_override else getattr(model.config, "max_seq_len", 512)
 
             self.profiler = Profiler(
                 model=model,
@@ -56,18 +62,8 @@ try:
                 device=args.device,
                 warmup_steps=self.warmup_steps,
             )
+            self._prev_step_end_time = None
             print(f"[Profiler] Initialized. GPU: {self.profiler._gpu_name or 'CPU'}")
-
-        def on_step_begin(
-            self,
-            args: TrainingArguments,
-            state: TrainerState,
-            control: TrainerControl,
-            **kwargs,
-        ):
-            if args.device.type == "cuda":
-                torch.cuda.synchronize()
-            self._step_start_time = time.perf_counter()
 
         def on_step_end(
             self,
@@ -82,19 +78,22 @@ try:
             if args.device.type == "cuda":
                 torch.cuda.synchronize()
 
-            elapsed_ms = (time.perf_counter() - self._step_start_time) * 1000
+            now = time.perf_counter()
 
             self.profiler._step_count += 1
             if self.profiler._step_count > self.profiler.warmup_steps:
-                self.profiler.stats.step_times_ms.append(elapsed_ms)
+                # Measure time between consecutive optimizer-step completions
+                if self._prev_step_end_time is not None:
+                    elapsed_ms = (now - self._prev_step_end_time) * 1000
+                    self.profiler.stats.step_times_ms.append(elapsed_ms)
 
                 if args.device.type == "cuda":
-                    import torch
-
                     mem_gb = torch.cuda.max_memory_allocated(args.device) / 1024**3
                     self.profiler.stats.peak_memory_gb = max(
                         self.profiler.stats.peak_memory_gb, mem_gb
                     )
+
+            self._prev_step_end_time = now
 
         def on_log(
             self,

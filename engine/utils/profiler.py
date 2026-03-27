@@ -97,14 +97,14 @@ class Profiler:
 
     # Peak theoretical FLOP/s for common GPUs (bfloat16 / float16 Tensor Core)
     _GPU_PEAK_TFLOPS = {
-        "Tesla T4":          65.1,
-        "Tesla V100":        112.0,
-        "NVIDIA A100":       312.0,
-        "NVIDIA H100":       989.0,
-        "NVIDIA RTX 3090":   142.0,
-        "NVIDIA RTX 4090":   330.0,
-        "NVIDIA RTX 3080":   119.0,
-        "NVIDIA A10G":       125.0,
+        "Tesla T4": 65.1,
+        "Tesla V100": 112.0,
+        "NVIDIA A100": 312.0,
+        "NVIDIA H100": 989.0,
+        "NVIDIA RTX 3090": 142.0,
+        "NVIDIA RTX 4090": 330.0,
+        "NVIDIA RTX 3080": 119.0,
+        "NVIDIA A10G": 125.0,
     }
 
     def __init__(
@@ -115,15 +115,13 @@ class Profiler:
         device: torch.device,
         warmup_steps: int = 5,
     ) -> None:
-        self.device       = device
+        self.device = device
         self.warmup_steps = warmup_steps
-        self._step_count  = 0
-        self._t_start     = 0.0
-        self.stats        = ProfilerStats(
-            tokens_per_step=batch_size * seq_len
-        )
+        self._step_count = 0
+        self._t_start = 0.0
+        self.stats = ProfilerStats(tokens_per_step=batch_size * seq_len)
         self._count_params(model)
-        self._gpu_name    = self._detect_gpu()
+        self._gpu_name = self._detect_gpu()
 
     # ── Parameter counting ────────────────────────────────────────────────
 
@@ -197,16 +195,16 @@ class Profiler:
 
     def report(self, step: Optional[int] = None) -> str:
         """Return a formatted one-line report string."""
-        tps    = self.stats.tokens_per_sec
-        ms     = self.stats.mean_step_ms
-        mem    = self.stats.peak_memory_gb
-        mfu_v  = self.mfu()
+        tps = self.stats.tokens_per_sec
+        ms = self.stats.mean_step_ms
+        mem = self.stats.peak_memory_gb
+        mfu_v = self.mfu()
 
         parts = [f"step={step or self._step_count}"]
         parts.append(f"step_time={ms:.0f}ms")
         parts.append(f"tok/s={tps:,.0f}")
         if mfu_v is not None:
-            parts.append(f"MFU={mfu_v*100:.1f}%")
+            parts.append(f"MFU={mfu_v * 100:.1f}%")
         if self.device.type == "cuda" and mem > 0:
             parts.append(f"mem={mem:.2f}GB")
 
@@ -215,13 +213,13 @@ class Profiler:
     def summary(self) -> dict:
         """Return a dict of all metrics (for logging to W&B / JSON)."""
         d = {
-            "tokens_per_sec":       round(self.stats.tokens_per_sec),
-            "mean_step_ms":         round(self.stats.mean_step_ms, 1),
-            "model_params":         self.stats.model_params,
-            "non_embed_params":     self.stats.non_embed_params,
-            "flops_per_token":      round(self.stats.flops_per_token),
-            "achieved_tflops":      round(self.stats.achieved_flops_per_sec / 1e12, 3),
-            "peak_memory_gb":       round(self.stats.peak_memory_gb, 3),
+            "tokens_per_sec": round(self.stats.tokens_per_sec),
+            "mean_step_ms": round(self.stats.mean_step_ms, 1),
+            "model_params": self.stats.model_params,
+            "non_embed_params": self.stats.non_embed_params,
+            "flops_per_token": round(self.stats.flops_per_token),
+            "achieved_tflops": round(self.stats.achieved_flops_per_sec / 1e12, 3),
+            "peak_memory_gb": round(self.stats.peak_memory_gb, 3),
         }
         mfu_v = self.mfu()
         if mfu_v is not None:
@@ -234,7 +232,7 @@ class Profiler:
     @staticmethod
     def benchmark(
         model: nn.Module,
-        dm,                       # DeviceManager
+        dm,  # DeviceManager
         seq_len: int,
         batch_size: int,
         n_steps: int = 20,
@@ -255,13 +253,20 @@ class Profiler:
         Returns dict with tok/s, MFU, memory.
         """
         model.train()
-        _vocab = vocab_size or getattr(getattr(model, "config", None), "vocab_size", 1000)
+        _vocab = vocab_size or getattr(
+            getattr(model, "config", None), "vocab_size", 1000
+        )
         ids = torch.randint(0, _vocab, (batch_size, seq_len), device=dm.device)
 
-        profiler = Profiler(model, seq_len=seq_len, batch_size=batch_size,
-                            device=dm.device, warmup_steps=3)
+        profiler = Profiler(
+            model,
+            seq_len=seq_len,
+            batch_size=batch_size,
+            device=dm.device,
+            warmup_steps=3,
+        )
 
-        opt = torch.optim.SGD(model.parameters(), lr=1e-4)
+        opt = torch.optim.AdamW(model.parameters(), lr=1e-4)
 
         for _ in range(n_steps):
             with profiler.step():

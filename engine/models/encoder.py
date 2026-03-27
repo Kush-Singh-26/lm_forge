@@ -116,7 +116,7 @@ class EncoderEmbeddings(nn.Module):
         if hasattr(self.pe, "set_head_dim"):
             self.pe.set_head_dim(cfg.head_dim)
         self.norm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
-        self.drop = nn.Dropout(0.1)
+        self.drop = nn.Dropout(cfg.attention.dropout)
 
     def forward(
         self,

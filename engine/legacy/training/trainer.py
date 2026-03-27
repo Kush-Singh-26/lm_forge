@@ -226,6 +226,7 @@ class Trainer:
         if hasattr(self.model, "save_pretrained"):
             self.model.save_pretrained(ckpt)
         else:
+            self.exp_cfg.model.save(ckpt)
             torch.save(self.model.state_dict(), ckpt / "pytorch_model.bin")
 
         # Training state
@@ -234,6 +235,7 @@ class Trainer:
             "epoch": self.epoch,
             "micro_count": getattr(self, "_micro_count", 0),
             "optimizer": self.optimizer.state_dict(),
+            "rng_state": torch.get_rng_state().numpy(),
         }
         if self.scheduler:
             state["scheduler"] = self.scheduler.state_dict()
@@ -258,4 +260,7 @@ class Trainer:
             self.scheduler.load_state_dict(state["scheduler"])
         if self._scaler and "scaler" in state:
             self._scaler.load_state_dict(state["scaler"])
+        # Restore RNG state for exact resume of DataLoader shuffling
+        if "rng_state" in state:
+            torch.set_rng_state(torch.from_numpy(state["rng_state"]))
         print(f"[Trainer] Resumed from step {self.global_step}.")

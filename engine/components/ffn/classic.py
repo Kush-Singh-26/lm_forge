@@ -42,8 +42,6 @@ class ClassicFFN(nn.Module):
         # or "down_proj" still hit the right weights
         self.gate_proj = self.fc1
         self.down_proj = self.fc2
-        # up_proj doesn't exist in classic FFN; set to None to signal that
-        self.up_proj = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.drop(self.fc2(F.gelu(self.fc1(x))))

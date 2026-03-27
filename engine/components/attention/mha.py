@@ -94,6 +94,8 @@ class MultiHeadAttention(BaseAttention):
         attn_mask = attention_mask
         if pe_out.attn_bias is not None:
             bias = pe_out.attn_bias.to(q.dtype)
+            kv_len = k.shape[2]
+            bias = bias[:, :, -S:, -kv_len:]
             attn_mask = (attn_mask + bias) if attn_mask is not None else bias
 
         # ── Scaled dot-product attention ──────────────────────────────────

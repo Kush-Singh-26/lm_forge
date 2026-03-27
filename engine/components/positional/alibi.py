@@ -81,10 +81,9 @@ class ALiBi(nn.Module):
         # Relative position matrix: positions[i, j] = i - j
         # For causal models, we only care about i >= j.
         # i - j is the distance from the query to the key.
-        pos = torch.arange(seq_len).unsqueeze(0) - torch.arange(seq_len).unsqueeze(1)
-        # (H, S, S)  — each head has its own slope
-        # Distance penalty is -m * distance
-        bias = -self.slopes.unsqueeze(-1).unsqueeze(-1) * pos.float()
+        device = self.slopes.device
+        pos = torch.arange(seq_len, device=device).unsqueeze(0) - torch.arange(seq_len, device=device).unsqueeze(1)
+        bias = -self.slopes.unsqueeze(-1).unsqueeze(-1) * pos.abs().float()
         self._bias_cache = bias.unsqueeze(0)  # (1, H, S, S)
         self._cached_len = seq_len
 
@@ -94,8 +93,12 @@ class ALiBi(nn.Module):
         seq_len: int,
         position_ids: Optional[torch.Tensor] = None,
     ) -> PEOutput:
-        if seq_len > self._cached_len:
-            self._build(seq_len)
+        req_len = seq_len
+        if position_ids is not None:
+            req_len = max(req_len, int(position_ids.max().item()) + 1)
+            
+        if req_len > self._cached_len:
+            self._build(max(req_len * 2, 2048))
 
-        bias = self._bias_cache[:, :, :seq_len, :seq_len].to(hidden_states.device)
+        bias = self._bias_cache[:, :, :req_len, :req_len].to(hidden_states.device)
         return PEOutput(attn_bias=bias)

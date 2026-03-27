@@ -98,11 +98,10 @@ class MemmapDataset(Dataset):
         chunk = torch.from_numpy(
             self._data[start : start + self.seq_len + 1].astype(np.int64)
         )
-        # Returns the full chunk; the model handles the shift internally
-        # (input = chunk[:-1], target = chunk[1:])
+        # Returns shifted input/labels (standard convention)
         return {
-            "input_ids": chunk,
-            "labels": chunk,
+            "input_ids": chunk[:-1].clone(),
+            "labels": chunk[1:].clone(),
         }
 
     @property

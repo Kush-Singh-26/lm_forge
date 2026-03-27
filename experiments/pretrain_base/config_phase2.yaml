@@ -47,7 +47,6 @@ training:
   seq_len: 1024
   lr: 1.0e-4
   weight_decay: 0.1
-  warmup_ratio: 0.03
   max_grad_norm: 1.0
   dtype: "bfloat16"
   backend: "auto"
@@ -64,12 +63,12 @@ training:
     report_to: ["none"]
     run_name: "pretrain_phase2"
     save_total_limit: 5
-    load_best_model_at_end: false
     optim: "adamw_torch_fused"
     lr_scheduler_type: "cosine"
     warmup_steps: 1000
     dataloader_drop_last: true
     gradient_checkpointing: true
+    seed: 42
 
   data_hub_repo: ""
   data_dir: ""

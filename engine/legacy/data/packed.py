@@ -86,7 +86,7 @@ class PackedDataset(Dataset):
         for start in range(0, len(full_tensor) - seq_len, step):
             chunk = full_tensor[start : start + seq_len + 1]
             if len(chunk) == seq_len + 1:
-                self._chunks.append(chunk)
+                self._chunks.append(chunk.clone())
 
         if not self._chunks:
             raise ValueError(

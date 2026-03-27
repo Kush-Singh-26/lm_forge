@@ -75,7 +75,10 @@ def build_streaming_dataset(
 
     # Step 1: Tokenize (batched for speed)
     def tokenize_fn(examples):
-        return tokenizer(examples["text"], add_special_tokens=False)
+        try:
+            return tokenizer(examples["text"], add_special_tokens=False)
+        except TypeError:
+            return tokenizer(examples["text"])
 
     tokenized = ds.map(
         tokenize_fn,
@@ -145,19 +148,28 @@ def build_stack_v2(
 
     streams = []
     for lang in languages:
-        print(f"[data]   Adding language: {lang}")
-        ds = build_streaming_dataset(
-            dataset_name="bigcode/the-stack-v2",
-            tokenizer=tokenizer,
-            seq_len=seq_len,
-            text_column="content",
-            config_name=lang,
-            shuffle_buffer=shuffle_buffer // len(languages),
-        )
-        streams.append(ds)
+        # Language config name "C__" should be "C++" for the-stack-v2
+        lang_config = "C++" if lang == "C__" else lang
+        print(f"[data]   Adding language: {lang_config}")
+        try:
+            ds = build_streaming_dataset(
+                dataset_name="bigcode/the-stack-v2",
+                tokenizer=tokenizer,
+                seq_len=seq_len,
+                text_column="content",
+                config_name=lang_config,
+                shuffle_buffer=shuffle_buffer // len(languages),
+            )
+            streams.append(ds)
+        except Exception as e:
+            import warnings
 
-    # Interleave with uniform sampling
-    combined = interleave_datasets(streams, seed=42)
+            warnings.warn(
+                f"Failed to load language config '{lang_config}': {e}. Skipping."
+            )
+
+    # Interleave with uniform sampling, exhausting all streams
+    combined = interleave_datasets(streams, seed=42, stopping_strategy="all_exhausted")
     print(f"[data] Combined {len(languages)} language streams")
     return combined
 
@@ -170,14 +182,17 @@ class SyntheticDataset:
 
     def __init__(self, n_samples: int, seq_len: int, vocab_size: int = 50257):
         import torch
-
-        self.data = torch.randint(0, vocab_size, (n_samples, seq_len))
+        gen = torch.Generator().manual_seed(42)
+        self.data = torch.randint(0, vocab_size, (n_samples, seq_len), generator=gen)
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
+        import torch
+        ids = self.data[idx].clone()
         return {
-            "input_ids": self.data[idx].tolist(),
-            "labels": self.data[idx].tolist(),
+            "input_ids": ids,
+            "labels": ids.clone(),
+            "attention_mask": torch.ones_like(ids),
         }

@@ -263,6 +263,7 @@ def pretokenize(
             arr[cursor : cursor + n] = ids
             cursor += n
         arr.flush()
+        del arr
         return total
 
     train_path = output_dir / "train.bin"
@@ -345,23 +346,38 @@ def _push_to_hub(
         print(f"\n[pretokenize] Pushing to Hub: {hub_repo}")
 
     # Upload all files in output_dir
-    for fname in ["train.bin", "val.bin", "meta.json"]:
-        fpath = output_dir / fname
-        if not fpath.exists():
-            continue
-        size_mb = fpath.stat().st_size / 1024**2
-        if verbose:
-            print(f"  Uploading {fname}  ({size_mb:.0f} MB)...")
-        try:
-            api.upload_file(
-                path_or_fileobj=str(fpath),
-                path_in_repo=fname,
-                repo_id=hub_repo,
-                repo_type="dataset",
-                commit_message=f"Tokenized {dataset_name} with {tokenizer_name}",
-            )
-        except Exception as e:
-            print(f"  Upload failed for {fname}: {e}")
+    failed_uploads = []
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {}
+        for fname in ["train.bin", "val.bin", "meta.json"]:
+            fpath = output_dir / fname
+            if fpath.exists():
+                future = executor.submit(
+                    api.upload_file,
+                    path_or_fileobj=str(fpath),
+                    path_in_repo=fname,
+                    repo_id=hub_repo,
+                    repo_type="dataset",
+                    commit_message=f"Tokenized {dataset_name} with {tokenizer_name}",
+                )
+                futures[future] = fname
+        
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Uploading to Hub"):
+            fname = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                failed_uploads.append(fname)
+                print(f"Failed to upload {fname}: {e}")
+
+    # Refuse to leave the Hub in a corrupt partial state
+    critical = {"train.bin", "meta.json"}
+    if critical & set(failed_uploads):
+        raise RuntimeError(
+            f"Critical file(s) failed to upload: {failed_uploads}. "
+            f"Hub repo {hub_repo} may be in an inconsistent state."
+        )
 
     # Auto-generate a dataset card
     card = f"""---

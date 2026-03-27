@@ -31,6 +31,7 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "lm"
     supports_gradient_checkpointing = True
     _no_split_modules = ["DecoderLayer"]
+    _tied_weights_keys = {"lm.lm_head.weight": "lm.model.embed_tokens.weight"}
 
     def __init__(self, config: LMForgeConfig) -> None:
         super().__init__(config)
@@ -38,9 +39,7 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         self.lm = CausalLM(model_cfg)
         self.post_init()
 
-    def _set_gradient_checkpointing(self, module, value=False):
-        if hasattr(module, "gradient_checkpointing"):
-            module.gradient_checkpointing = value
+
 
     def forward(
         self,
@@ -63,8 +62,12 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         use_cache = (
             use_cache
             if use_cache is not None
-            else getattr(self.config, "use_cache", False)
+            else getattr(self.config, "use_cache", True)
         )
+        # KV caching is incompatible with gradient checkpointing and wastes
+        # VRAM during training — always disable it.
+        if self.training:
+            use_cache = False
 
         if inputs_embeds is not None:
             raise NotImplementedError("inputs_embeds is not supported. Pass input_ids.")
@@ -104,7 +107,7 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
     def set_output_embeddings(self, new_embeddings: nn.Linear) -> None:
         self.lm.lm_head = new_embeddings
 
-    def tie_weights(self) -> None:
+    def tie_weights(self, **kwargs) -> None:
         if self.config.tie_word_embeddings:
             self.lm.lm_head.weight = self.lm.model.embed_tokens.weight
 
@@ -113,11 +116,16 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
     ):
         # Convert HF's DynamicCache to legacy tuple format if needed
         if past_key_values is not None and hasattr(past_key_values, "to_legacy_cache"):
-            legacy_cache = past_key_values.to_legacy_cache()
-            # Check if cache is populated - if all values are None, cache is empty
+            try:
+                legacy_cache = past_key_values.to_legacy_cache()
+            except Exception:
+                legacy_cache = past_key_values
+            # Check if cache is populated — shape check handles both None and
+            # empty tensors with shape (batch, heads, 0, head_dim) in recent transformers
             cache_empty = all(
                 layer_cache is None
                 or (layer_cache[0] is None and layer_cache[1] is None)
+                or (layer_cache[0].shape[2] == 0 and layer_cache[1].shape[2] == 0)
                 for layer_cache in legacy_cache
             )
             if cache_empty:
@@ -130,10 +138,8 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         if past_key_values:
             input_ids = input_ids[:, -1:]
 
-        # For generation, we don't need attention_mask for causal LM
-        # (causal mask is built into the model)
-        if attention_mask is not None and past_key_values is not None:
-            attention_mask = attention_mask[:, -1:]
+        # For generation, we retain the full attention_mask (length = kv_len)
+        # to ensure the model doesn't attend to padding tokens during decoding.
 
         return {
             "input_ids": input_ids,

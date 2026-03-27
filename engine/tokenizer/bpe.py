@@ -230,6 +230,12 @@ class BPETokenizer:
             text    : Input string.
             add_bos : Prepend BOS token (if <BOS> is a special token).
             add_eos : Append EOS token (if <EOS> is a special token).
+
+        Note:
+            This implementation has O(n^2) complexity per sequence. It is
+            suitable for educational use and small-to-medium corpora. For
+            production use at scale, use HFBPETokenizer or the Rust-backed
+            tokenizers library instead.
         """
         tokens = self._text_to_bytes(text)
 

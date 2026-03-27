@@ -132,6 +132,13 @@ class SlidingWindowAttention(BaseAttention):
         if attention_mask is not None:
             win_mask = win_mask + attention_mask
 
+        # ── ALiBi bias ────────────────────────────────────────────────────
+        if pe_out.attn_bias is not None:
+            bias = pe_out.attn_bias.to(q.dtype)
+            kv_len = k_exp.shape[2]
+            bias = bias[:, :, -S:, -kv_len:]
+            win_mask = win_mask + bias
+
         out = F.scaled_dot_product_attention(
             q, k_exp, v_exp,
             attn_mask=win_mask,

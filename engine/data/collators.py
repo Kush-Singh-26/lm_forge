@@ -136,7 +136,7 @@ class MLMCollator:
             & masked_indices
             & ~replace_mask
         )
-        random_tokens = torch.randint(0, self.vocab_size, input_ids.shape, dtype=torch.long)
+        random_tokens = torch.randint(len(self.special_ids), self.vocab_size, input_ids.shape, dtype=torch.long)
         input_ids[random_indices] = random_tokens[random_indices]
 
         # 10% → unchanged (already is — nothing to do)

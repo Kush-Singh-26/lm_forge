@@ -119,6 +119,28 @@ class DecoderModel(nn.Module):
         self.layers = nn.ModuleList([DecoderLayer(cfg) for _ in range(cfg.num_layers)])
         self.norm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
         self.gradient_checkpointing = False
+        self._causal_mask_cache: dict = {}
+
+    def reset_cache(self) -> None:
+        """Clear cached causal masks (e.g. after device change)."""
+        self._causal_mask_cache.clear()
+
+    def _get_causal_mask(
+        self, S: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Get or build a cached causal mask."""
+        norm_device = str(torch.device(device.type, device.index or 0))
+        key = (S, dtype, norm_device)
+        if key not in self._causal_mask_cache:
+            mask = torch.full(
+                (S, S),
+                float("-inf"),
+                device=device,
+                dtype=dtype,
+            )
+            mask = torch.triu(mask, diagonal=1)
+            self._causal_mask_cache[key] = mask
+        return self._causal_mask_cache[key]
 
     def enable_gradient_checkpointing(self) -> None:
         """
@@ -139,8 +161,13 @@ class DecoderModel(nn.Module):
         B, S = input_ids.shape
         hidden_states = self.embed_tokens(input_ids)
 
+        # ── Compute actual sequence length (including KV cache) ────────────
+        kv_len = S
+        if past_key_values is not None:
+            kv_len += past_key_values[0][0].shape[2]
+
         # PE — may modify hidden_states or produce cos/sin/bias
-        pe_out = self.pe(hidden_states, seq_len=S, position_ids=position_ids)
+        pe_out = self.pe(hidden_states, seq_len=kv_len, position_ids=position_ids)
         if pe_out.hidden_states is not None:
             hidden_states = pe_out.hidden_states
 
@@ -153,24 +180,21 @@ class DecoderModel(nn.Module):
 
         additive = None
         if S > 1 and past_key_values is None:
-            # Causal mask: upper triangle is -inf
-            additive = torch.full(
-                (S, S),
-                float("-inf"),
-                device=hidden_states.device,
-                dtype=hidden_states.dtype,
+            # Causal mask: upper triangle is -inf (cached for performance)
+            additive = self._get_causal_mask(
+                S, hidden_states.device, hidden_states.dtype
             )
-            additive = torch.triu(additive, diagonal=1)
             additive = additive.view(1, 1, S, S)
 
         if attention_mask is not None:
             # Padding mask: 0 in attention_mask means -inf
-            pad_mask = (attention_mask == 0).view(B, 1, 1, S)
+            kv_len = attention_mask.shape[-1]
+            pad_mask = (attention_mask == 0).view(B, 1, 1, kv_len)
             if additive is not None:
                 additive = additive.masked_fill(pad_mask, float("-inf"))
             else:
                 additive = torch.zeros(
-                    B, 1, 1, S, device=hidden_states.device, dtype=hidden_states.dtype
+                    B, 1, S, kv_len, device=hidden_states.device, dtype=hidden_states.dtype
                 )
                 additive = additive.masked_fill(pad_mask, float("-inf"))
         # ──────────────────────────────────────────────────────────────────
@@ -183,21 +207,18 @@ class DecoderModel(nn.Module):
                 # torch.utils.checkpoint rewrites the forward graph so that
                 # intermediate activations are not stored — they're recomputed
                 # during backward instead.  use_cache must be False.
-                def _ckpt_layer(layer):
-                    def _inner(hs, mask):
-                        out, _ = layer(
-                            hs,
-                            pe_out=pe_out,
-                            attention_mask=mask,
-                            past_key_value=None,
-                            use_cache=False,
-                        )
-                        return out
-
-                    return _inner
+                def _inner(hs, mask, layer=layer):
+                    out, _ = layer(
+                        hs,
+                        pe_out=pe_out,
+                        attention_mask=mask,
+                        past_key_value=None,
+                        use_cache=False,
+                    )
+                    return out
 
                 hidden_states = torch.utils.checkpoint.checkpoint(
-                    _ckpt_layer(layer),
+                    _inner,
                     hidden_states,
                     additive,
                     use_reentrant=False,
@@ -259,9 +280,13 @@ class CausalLM(BaseLM):
 
         loss = None
         if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            
             loss = nn.functional.cross_entropy(
-                logits[..., :-1, :].contiguous().view(-1, logits.size(-1)),
-                labels[..., 1:].contiguous().view(-1),
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
                 ignore_index=-100,
             )
         return logits, loss, presents
@@ -274,6 +299,7 @@ class CausalLM(BaseLM):
         temperature: float = 1.0,
         top_k: int = 0,
         eos_token_id: Optional[int] = None,
+        generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         self.eval()
         past: list = []
@@ -284,7 +310,7 @@ class CausalLM(BaseLM):
             if top_k > 0:
                 vals, _ = torch.topk(next_logits, top_k)
                 next_logits[next_logits < vals[:, -1:]] = float("-inf")
-            tok = torch.multinomial(torch.softmax(next_logits, -1), 1)
+            tok = torch.multinomial(torch.softmax(next_logits, -1), 1, generator=generator)
             input_ids = torch.cat([input_ids, tok], -1)
             if eos_token_id is not None and (tok == eos_token_id).all():
                 break
