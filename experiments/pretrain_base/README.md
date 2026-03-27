@@ -1,6 +1,6 @@
-# Pretrain Base Model — 85M Parameter Pretraining
+# Pretrain Base Model — 160M Parameter Pretraining
 
-Pretrain an 85M parameter decoder-only transformer on two datasets sequentially, then fine-tune on domain-specific data (PowerShell).
+Pretrain a 160M parameter decoder-only transformer on two datasets sequentially, then fine-tune on domain-specific data (PowerShell).
 
 ## What This Does
 
@@ -10,7 +10,7 @@ Pretrain an 85M parameter decoder-only transformer on two datasets sequentially,
 | Phase 2 | `bigcode/the-stack-v2` | ~5–10B | Code syntax, variables, loops, script patterns |
 | Phase 3 | PS1 corpus (separate experiment) | fine-tune | PowerShell generation |
 
-**Model:** 16 layers, hidden 512, GQA (8Q/2KV), RoPE, SwiGLU, RMSNorm, SmolLM tokenizer (49,152 vocab).
+**Model:** 20 layers, hidden 768, GQA (8Q/2KV), RoPE, SwiGLU, RMSNorm, SmolLM tokenizer (49,152 vocab).
 
 ---
 

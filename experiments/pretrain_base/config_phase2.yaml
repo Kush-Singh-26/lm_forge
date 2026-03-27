@@ -13,8 +13,8 @@ experiment:
 
 model:
   vocab_size: 49152          # SmolLM tokenizer (trained on FineWeb-edu + code mix)
-  hidden_size: 512
-  num_layers: 16
+  hidden_size: 768
+  num_layers: 20
   max_seq_len: 1024
   tie_word_embeddings: true
 
@@ -30,7 +30,7 @@ model:
 
   ffn:
     type: "swiglu"
-    intermediate_size: 1536
+    intermediate_size: 2048
     dropout: 0.0
     bias: false
 

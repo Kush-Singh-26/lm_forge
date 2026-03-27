@@ -75,7 +75,6 @@ class RoPE(nn.Module):
     def set_head_dim(self, head_dim: int) -> None:
         """Called by the model after it knows head_dim."""
         self._head_dim = head_dim
-        self._build(2048)  # build initial cache
 
     def _build(self, seq_len: int, device: Optional[torch.device] = None) -> None:
         if device is None:
@@ -100,7 +99,10 @@ class RoPE(nn.Module):
         seq_len: int,
         position_ids: Optional[torch.Tensor] = None,
     ) -> PEOutput:
-        if seq_len > self._cached_len or self._cos.device != hidden_states.device:
+        if (
+            seq_len > self._cached_len
+            or self._cos.device.type != hidden_states.device.type
+        ):
             self._build(max(seq_len * 2, 2048), device=hidden_states.device)
 
         if position_ids is None:

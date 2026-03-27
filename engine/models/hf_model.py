@@ -31,15 +31,12 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
     base_model_prefix = "lm"
     supports_gradient_checkpointing = True
     _no_split_modules = ["DecoderLayer"]
-    _tied_weights_keys = {"lm.lm_head.weight": "lm.model.embed_tokens.weight"}
 
     def __init__(self, config: LMForgeConfig) -> None:
         super().__init__(config)
         model_cfg = config.to_model_config()
         self.lm = CausalLM(model_cfg)
         self.post_init()
-
-
 
     def forward(
         self,
@@ -111,6 +108,12 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         if self.config.tie_word_embeddings:
             self.lm.lm_head.weight = self.lm.model.embed_tokens.weight
 
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        self.lm.model.enable_gradient_checkpointing()
+
+    def gradient_checkpointing_disable(self):
+        self.lm.model.gradient_checkpointing = False
+
     def prepare_inputs_for_generation(
         self, input_ids, past_key_values=None, attention_mask=None, **kwargs
     ):
@@ -119,20 +122,22 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
             try:
                 legacy_cache = past_key_values.to_legacy_cache()
             except Exception:
-                legacy_cache = past_key_values
-            # Check if cache is populated — shape check handles both None and
-            # empty tensors with shape (batch, heads, 0, head_dim) in recent transformers
-            cache_empty = all(
-                layer_cache is None
-                or (layer_cache[0] is None and layer_cache[1] is None)
-                or (layer_cache[0].shape[2] == 0 and layer_cache[1].shape[2] == 0)
-                for layer_cache in legacy_cache
-            )
-            if cache_empty:
-                # Cache not yet populated, treat as no cache
+                # Cache conversion failed, treat as no cache
                 past_key_values = None
             else:
-                past_key_values = legacy_cache
+                # Check if cache is populated — shape check handles both None and
+                # empty tensors with shape (batch, heads, 0, head_dim) in recent transformers
+                cache_empty = all(
+                    layer_cache is None
+                    or (layer_cache[0] is None and layer_cache[1] is None)
+                    or (layer_cache[0].shape[2] == 0 and layer_cache[1].shape[2] == 0)
+                    for layer_cache in legacy_cache
+                )
+                if cache_empty:
+                    # Cache not yet populated, treat as no cache
+                    past_key_values = None
+                else:
+                    past_key_values = legacy_cache
 
         # only last token for inputs_ids if past is defined
         if past_key_values:

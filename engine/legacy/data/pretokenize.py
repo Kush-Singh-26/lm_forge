@@ -64,11 +64,13 @@ import argparse
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from tqdm import tqdm
 
 
 # ── Output info dataclass ─────────────────────────────────────────────────────
@@ -347,7 +349,7 @@ def _push_to_hub(
 
     # Upload all files in output_dir
     failed_uploads = []
-    
+
     with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {}
         for fname in ["train.bin", "val.bin", "meta.json"]:
@@ -362,8 +364,10 @@ def _push_to_hub(
                     commit_message=f"Tokenized {dataset_name} with {tokenizer_name}",
                 )
                 futures[future] = fname
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Uploading to Hub"):
+
+        for future in tqdm(
+            as_completed(futures), total=len(futures), desc="Uploading to Hub"
+        ):
             fname = futures[future]
             try:
                 future.result()

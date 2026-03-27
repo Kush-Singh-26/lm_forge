@@ -8,7 +8,7 @@ Includes tokenization and native packing (concatenate and chunk).
 from __future__ import annotations
 from typing import Optional
 import itertools
-import inspect
+
 
 def prepare_dataset(
     dataset,
@@ -27,7 +27,9 @@ def prepare_dataset(
     """
     if num_proc is None:
         import os
+
         num_proc = min(4, os.cpu_count() or 1)
+
     def tokenize_function(examples):
         texts = examples[text_column]
         try:

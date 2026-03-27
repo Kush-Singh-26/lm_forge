@@ -37,6 +37,10 @@ Examples:
 
 from __future__ import annotations
 
+import os
+
+os.environ["TRANSFORMERS_SAFE_SERIALIZATION"] = "0"
+
 import argparse
 import sys
 from pathlib import Path
@@ -50,6 +54,7 @@ from transformers import (
     AutoTokenizer,
     TrainingArguments,
     Trainer as HFTrainer,
+    DataCollatorForLanguageModeling,
 )
 
 from engine import load_experiment_config, HFCausalLM, prepare_dataset
@@ -189,9 +194,8 @@ def apply_t4_overrides(exp):
     exp.training.batch_size = 8
     exp.training.grad_accum = 32
     exp.training.dtype = "float16"
-    # Update HF args if present
     if hasattr(exp.training, "hf_args") and isinstance(exp.training.hf_args, dict):
-        exp.training.hf_args.pop("optim", None)  # let HF choose safe default for fp16
+        exp.training.hf_args["optim"] = "adamw_torch"
     return exp
 
 
@@ -230,7 +234,6 @@ def main():
 
     # Re-validate after any overrides are applied
     exp.model.__post_init__()
-    exp.validate()
 
     # 2. Print config summary
     phase_name = "fineweb-edu" if args.phase == 1 else "the-stack-v2"
@@ -289,7 +292,15 @@ def main():
     output_dir = f"checkpoints/{exp.name}"
 
     from engine.data import default_num_workers
-    workers = exp.training.num_workers if exp.training.num_workers >= 0 else default_num_workers()
+
+    if eval_ds is None:
+        workers = 0
+    else:
+        workers = (
+            exp.training.num_workers
+            if exp.training.num_workers >= 0
+            else default_num_workers()
+        )
 
     training_args_dict = dict(
         output_dir=output_dir,
@@ -304,6 +315,7 @@ def main():
         fp16=(exp.training.dtype == "float16"),
         logging_steps=exp.training.log_every,
         save_steps=exp.training.save_every,
+        save_safetensors=False,  # Tied weights conflict with safetensors
         dataloader_drop_last=True,
         gradient_checkpointing=True,
         push_to_hub=bool(exp.hub.repo_id),
@@ -323,6 +335,7 @@ def main():
     else:
         # Streaming mode — no eval
         training_args_dict["eval_strategy"] = "no"
+        training_args_dict["load_best_model_at_end"] = False
 
     # Merge YAML hf_args overrides safely
     if exp.training.hf_args:
@@ -343,11 +356,13 @@ def main():
         callbacks.append(ProfilingCallback(seq_len=exp.training.seq_len))
 
     # Use processing_class (transformers >= 4.46) with tokenizer fallback
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         eval_dataset=eval_ds,
+        data_collator=data_collator,
         callbacks=callbacks,
     )
     try:

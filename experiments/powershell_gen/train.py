@@ -1,7 +1,7 @@
 import argparse
 import os
 import torch
-from engine.config import load_config
+from engine.config import load_experiment_config
 from engine.legacy.training import Trainer
 from engine.models import CausalLM
 
@@ -14,7 +14,7 @@ def main():
     args = parser.parse_args()
 
     # Load configuration
-    config = load_config(args.config)
+    config = load_experiment_config(args.config)
 
     # Initialize model
     model = CausalLM(config.model)
