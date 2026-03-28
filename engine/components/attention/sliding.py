@@ -42,16 +42,6 @@ class SlidingWindowAttention(BaseAttention):
         self.window_size = attn.window_size
         self.scale = 1.0 / math.sqrt(self.head_dim)
         self.dropout = attn.dropout
-        self.use_flash = getattr(attn, "flash_attn", False)
-
-        if self.use_flash:
-            try:
-                import flash_attn  # noqa: F401
-            except ImportError:
-                raise ImportError(
-                    "flash_attn not installed. "
-                    "Run: pip install flash-attn --no-build-isolation"
-                )
 
         d = cfg.hidden_size
         self.q_dim = self.num_heads * self.head_dim
@@ -121,10 +111,7 @@ class SlidingWindowAttention(BaseAttention):
                 k, v = past_key_value.update(k, v, layer_idx)
 
                 # Manual eviction for standard Cache objects that don't handle sliding windows
-                # (Standard DynamicCache just keeps growing).
                 if k.shape[2] > self.window_size:
-                    # Note: Slicing a Cache object is tricky, but here we only
-                    # care about the tensors for the current forward pass.
                     k = k[:, :, -self.window_size :]
                     v = v[:, :, -self.window_size :]
             else:
@@ -137,55 +124,37 @@ class SlidingWindowAttention(BaseAttention):
                     v = v[:, :, -self.window_size :]
         present = (k, v) if use_cache else None
 
-        if self.use_flash and pe_out.attn_bias is None:
-            from flash_attn import flash_attn_func
+        # ── Grouped-Query Expansion ──────────────────────────────────────
+        k_exp = self._expand_kv(k, self.kv_groups)
+        v_exp = self._expand_kv(v, self.kv_groups)
 
-            q_fa = q.transpose(1, 2)
-            k_fa = k.transpose(1, 2)
-            v_fa = v.transpose(1, 2)
-
-            out = flash_attn_func(
-                q_fa,
-                k_fa,
-                v_fa,
-                dropout_p=self.dropout if self.training else 0.0,
-                causal=True,
-                window_size=(self.window_size, self.window_size),
-                softmax_scale=self.scale,
-            )
-            out = out.reshape(B, S, -1)
+        # ── Sliding window mask ──────────────────────────────────────────
+        kv_len = k_exp.shape[2]
+        if attention_mask is not None and attention_mask.shape[-2:] == (S, kv_len):
+            win_mask = attention_mask
         else:
-            k_exp = self._expand_kv(k, self.kv_groups)
-            v_exp = self._expand_kv(v, self.kv_groups)
-
-            # ── Sliding window mask ──────────────────────────────────────────
-            kv_len = k_exp.shape[2]
-            # Use the mask cached in the model if available (passed through attention_mask)
-            # or build a local one (fallback).
-            if attention_mask is not None and attention_mask.shape[-2:] == (S, kv_len):
-                win_mask = attention_mask
-            else:
-                win_mask = _sliding_window_mask(
-                    kv_len, self.window_size, hidden_states.device
-                )
-                win_mask = win_mask[-S:, :]
-                win_mask = win_mask.unsqueeze(0).unsqueeze(0).to(q.dtype)
-
-            if pe_out.attn_bias is not None:
-                bias = pe_out.attn_bias.to(q.dtype)
-                if bias.shape[2] > S or bias.shape[3] > kv_len:
-                    bias = bias[:, :, -S:, -kv_len:]
-                win_mask = win_mask + bias
-
-            out = F.scaled_dot_product_attention(
-                q,
-                k_exp,
-                v_exp,
-                attn_mask=win_mask,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=False,
-                scale=self.scale,
+            win_mask = _sliding_window_mask(
+                kv_len, self.window_size, hidden_states.device
             )
-            out = out.transpose(1, 2).contiguous().view(B, S, -1)
+            win_mask = win_mask[-S:, :]
+            win_mask = win_mask.unsqueeze(0).unsqueeze(0).to(q.dtype)
+
+        if pe_out.attn_bias is not None:
+            bias = pe_out.attn_bias.to(q.dtype)
+            if bias.shape[2] > S or bias.shape[3] > kv_len:
+                bias = bias[:, :, -S:, -kv_len:]
+            win_mask = win_mask + bias
+
+        # PyTorch native SDPA with a sliding window mask.
+        out = F.scaled_dot_product_attention(
+            q,
+            k_exp,
+            v_exp,
+            attn_mask=win_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,
+            scale=self.scale,
+        )
+        out = out.transpose(1, 2).contiguous().view(B, S, -1)
         return self.o_proj(out), present
         return self.o_proj(out), present

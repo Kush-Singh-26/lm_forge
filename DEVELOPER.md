@@ -39,7 +39,7 @@ The `build_attention(cfg)` factory will automatically find and instantiate your 
 
 We use several strategies to maximize GPU utilization:
 - **Fused Projections**: QKV projections are fused into a single `nn.Linear` to reduce kernel launches.
-- **Flash Attention 2**: Integrated for GQA, MQA, and Sliding Window.
+- **PyTorch Native SDPA**: Automatically selects the fastest available kernel (Flash Attention 2, Memory-Efficient, or math) for GQA, MQA, and Sliding Window.
 - **Vectorized Collators**: Data masking and padding use vectorized PyTorch operations instead of Python loops.
 - **Zero-Copy Data Prep**: Uses NumPy memory-mapping and view-based reshaping to avoid unnecessary copies.
 

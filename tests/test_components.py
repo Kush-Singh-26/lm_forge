@@ -397,15 +397,3 @@ class TestConfigs:
                 attention=AttentionConfig(num_heads=12, num_kv_heads=4),
                 positional=PositionalConfig(type="rope"),
             )
-
-    def test_flash_attn_alibi_incompatible(self):
-        from engine.config.schema import ExperimentConfig
-
-        cfg = ExperimentConfig()
-        cfg.model.attention.flash_attn = True
-        cfg.model.positional.type = "alibi"
-        with pytest.raises(
-            ValueError,
-            match="Flash Attention 2 does not natively support additive bias",
-        ):
-            cfg.validate()

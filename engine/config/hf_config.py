@@ -68,7 +68,6 @@ try:
             attention__num_kv_heads: int = 8,
             attention__dropout: float = 0.0,
             attention__window_size: int = 512,
-            attention__flash_attn: bool = False,
             # ── positional ─────────────────────────────────────────────
             positional__type: str = "rope",
             positional__theta: float = 10_000.0,
@@ -113,7 +112,6 @@ try:
             self.attention__num_kv_heads = attention__num_kv_heads
             self.attention__dropout = attention__dropout
             self.attention__window_size = attention__window_size
-            self.attention__flash_attn = attention__flash_attn
 
             # positional
             self.positional__type = positional__type
@@ -158,7 +156,6 @@ try:
                 attention__num_kv_heads=cfg.attention.num_kv_heads,
                 attention__dropout=cfg.attention.dropout,
                 attention__window_size=cfg.attention.window_size,
-                attention__flash_attn=cfg.attention.flash_attn,
                 positional__type=cfg.positional.type,
                 positional__theta=cfg.positional.theta,
                 positional__max_seq_len=cfg.positional.max_seq_len,
@@ -190,7 +187,6 @@ try:
                     num_kv_heads=self.attention__num_kv_heads,
                     dropout=self.attention__dropout,
                     window_size=self.attention__window_size,
-                    flash_attn=self.attention__flash_attn,
                 ),
                 positional=PositionalConfig(
                     type=self.positional__type,

@@ -31,16 +31,6 @@ class GroupedQueryAttention(BaseAttention):
         self.head_dim = cfg.head_dim
         self.scale = 1.0 / math.sqrt(self.head_dim)
         self.dropout = attn.dropout
-        self.use_flash = getattr(attn, "flash_attn", False)
-
-        if self.use_flash:
-            try:
-                import flash_attn  # noqa: F401
-            except ImportError:
-                raise ImportError(
-                    "flash_attn not installed. "
-                    "Run: pip install flash-attn --no-build-isolation"
-                )
 
         d = cfg.hidden_size
         self.q_dim = self.num_heads * self.head_dim
@@ -125,38 +115,21 @@ class GroupedQueryAttention(BaseAttention):
                 bias = bias[:, :, -S:, -kv_len:]
             attn_mask = (attn_mask + bias) if attn_mask is not None else bias
 
-        if self.use_flash and pe_out.attn_bias is None:
-            from flash_attn import flash_attn_func
+        # Always use PyTorch native SDPA.
+        # It automatically uses Flash Attention 2 on H100/A100 and
+        # optimized kernels on T4/CPU/MPS.
+        k_expanded = self._expand_kv(k, self.kv_groups)
+        v_expanded = self._expand_kv(v, self.kv_groups)
 
-            # Flash Attention natively supports GQA by broadcasting KV heads.
-            # We pass q, k, v in (B, S, H, D) format.
-            q_fa = q.transpose(1, 2)
-            k_fa = k.transpose(1, 2)
-            v_fa = v.transpose(1, 2)
-
-            out = flash_attn_func(
-                q_fa,
-                k_fa,
-                v_fa,
-                dropout_p=self.dropout if self.training else 0.0,
-                causal=(attn_mask is None and S > 1),
-                softmax_scale=self.scale,
-            )
-            out = out.reshape(B, S, -1)
-        else:
-            # GQA head expansion for SDPA
-            k_expanded = self._expand_kv(k, self.kv_groups)
-            v_expanded = self._expand_kv(v, self.kv_groups)
-
-            out = F.scaled_dot_product_attention(
-                q,
-                k_expanded,
-                v_expanded,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout if self.training else 0.0,
-                is_causal=(attn_mask is None and S > 1),
-                scale=self.scale,
-            )
-            out = out.transpose(1, 2).contiguous().view(B, S, -1)
+        out = F.scaled_dot_product_attention(
+            q,
+            k_expanded,
+            v_expanded,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=(attn_mask is None and S > 1),
+            scale=self.scale,
+        )
+        out = out.transpose(1, 2).contiguous().view(B, S, -1)
         return self.o_proj(out), present
         return self.o_proj(out), present

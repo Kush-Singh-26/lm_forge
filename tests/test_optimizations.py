@@ -4,27 +4,6 @@ from engine.models.decoder import CausalLM
 from engine.components.attention.gqa import GroupedQueryAttention
 
 
-def test_flash_attn_propagation():
-    """
-    Verifies that flash_attn flag is correctly propagated to the attention modules.
-    """
-    cfg = ModelConfig(attention=AttentionConfig(flash_attn=True))
-    try:
-        model = CausalLM(cfg)
-    except ImportError as e:
-        if "flash-attn" in str(e):
-            print("Skipping flash_attn test (not installed)")
-            return
-        raise e
-
-    found = False
-    for module in model.modules():
-        if isinstance(module, GroupedQueryAttention):
-            assert module.use_flash == True
-            found = True
-    assert found
-
-
 def test_torch_compile():
     """
     Verifies that the model is compatible with torch.compile.
@@ -56,5 +35,4 @@ def test_torch_compile():
 
 
 if __name__ == "__main__":
-    test_flash_attn_propagation()
     test_torch_compile()

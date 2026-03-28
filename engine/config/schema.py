@@ -26,8 +26,6 @@ class AttentionConfig:
     dropout: float = 0.0
     # sliding window only
     window_size: int = 512
-    # Flash Attention 2 (requires: pip install flash-attn --no-build-isolation)
-    flash_attn: bool = False
 
     def __post_init__(self):
         if self.type == "mqa":
@@ -218,12 +216,6 @@ class ExperimentConfig:
             raise ValueError(
                 f"training.seq_len ({t.seq_len}) exceeds model.max_seq_len "
                 f"({m.max_seq_len}). Increase max_seq_len or reduce seq_len."
-            )
-
-        if m.attention.flash_attn and m.positional.type == "alibi":
-            raise ValueError(
-                "Flash Attention 2 does not natively support additive bias (ALiBi). "
-                "Disable flash_attn or use RoPE instead."
             )
 
 

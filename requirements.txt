@@ -13,11 +13,6 @@ safetensors>=0.4.0
 datasets>=2.18.0
 transformers>=4.40.0
 
-# ── Performance (optional but recommended) ───────────────────────────────
-# Flash Attention 2 — ~1.5-2× faster attention on CUDA with fp16/bf16
-# Requires a CUDA environment to build. Skip on CPU-only machines.
-# flash-attn>=2.5.0  # uncomment after: pip install flash-attn --no-build-isolation
-
 # ── HF ecosystem (optional) ──────────────────────────────────────────────
 # accelerate>=0.27.0   # for --trainer hf with multi-GPU / FSDP / DeepSpeed
 # peft>=0.10.0         # for LoRA / QLoRA fine-tuning
