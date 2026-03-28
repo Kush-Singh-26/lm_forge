@@ -23,10 +23,16 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Use fused native RMSNorm if available (PyTorch 2.4+)
+        if hasattr(nn.functional, "rms_norm"):
+            return nn.functional.rms_norm(
+                x, (self.weight.shape[0],), self.weight, self.eps
+            ).to(x.dtype)
+
+        # Fallback with careful upcasting to avoid full FP32 tensor allocation if possible
         dtype = x.dtype
-        x = x.float()
-        rms = torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (self.weight * x * rms).to(dtype)
+        rms = torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps).to(dtype)
+        return (self.weight.to(dtype) * x) * rms
 
 
 class LayerNorm(nn.Module):
@@ -40,12 +46,19 @@ class LayerNorm(nn.Module):
         self._shape = (hidden_size,)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return nn.functional.layer_norm(x, self._shape, self.weight, self.bias, self.eps)
+        return nn.functional.layer_norm(
+            x, self._shape, self.weight, self.bias, self.eps
+        )
 
 
 def build_norm(norm_type: str, hidden_size: int, eps: float = 1e-5) -> nn.Module:
     """Factory — matches config.norm.type."""
     match norm_type:
-        case "rms":   return RMSNorm(hidden_size, eps)
-        case "layer": return LayerNorm(hidden_size, eps)
-        case _: raise ValueError(f"Unknown norm type '{norm_type}'. Choose 'rms' or 'layer'.")
+        case "rms":
+            return RMSNorm(hidden_size, eps)
+        case "layer":
+            return LayerNorm(hidden_size, eps)
+        case _:
+            raise ValueError(
+                f"Unknown norm type '{norm_type}'. Choose 'rms' or 'layer'."
+            )

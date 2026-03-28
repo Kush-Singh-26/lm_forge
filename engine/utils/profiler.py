@@ -60,6 +60,9 @@ class ProfilerStats:
     peak_memory_gb: float = 0.0
     model_params: int = 0
     non_embed_params: int = 0
+    num_layers: int = 0
+    hidden_size: int = 0
+    seq_len: int = 0
 
     @property
     def mean_step_ms(self) -> float:
@@ -75,8 +78,13 @@ class ProfilerStats:
 
     @property
     def flops_per_token(self) -> float:
-        """6N approximation (forward + backward ≈ 3× forward, forward ≈ 2N)."""
-        return 6.0 * self.non_embed_params
+        """
+        Estimate FLOPs per token (forward + backward).
+        6N approximation + 12 * L * H * S (attention term)
+        """
+        base = 6.0 * self.non_embed_params
+        attn = 12.0 * self.num_layers * self.hidden_size * self.seq_len
+        return base + attn
 
     @property
     def achieved_flops_per_sec(self) -> float:
@@ -119,7 +127,10 @@ class Profiler:
         self.warmup_steps = warmup_steps
         self._step_count = 0
         self._t_start = 0.0
-        self.stats = ProfilerStats(tokens_per_step=batch_size * seq_len)
+        self.stats = ProfilerStats(
+            tokens_per_step=batch_size * seq_len,
+            seq_len=seq_len,
+        )
         self._count_params(model)
         self._gpu_name = self._detect_gpu()
 
@@ -127,12 +138,22 @@ class Profiler:
 
     def _count_params(self, model: nn.Module) -> None:
         self.stats.model_params = sum(p.numel() for p in model.parameters())
-        # Estimate non-embedding params (subtract embed_tokens if present)
+
+        # Determine architecture params from config if possible
+        cfg = getattr(model, "config", None)
+        if cfg:
+            # ModelConfig or LMForgeConfig
+            self.stats.num_layers = getattr(
+                cfg, "num_layers", getattr(cfg, "num_hidden_layers", 0)
+            )
+            self.stats.hidden_size = getattr(cfg, "hidden_size", 0)
+
+        # Estimate non-embedding params (subtract the largest embedding layer, usually vocab)
         embed_params = 0
-        for name, module in model.named_modules():
-            if "embed_tokens" in name and isinstance(module, nn.Embedding):
-                embed_params = module.weight.numel()
-                break
+        for module in model.modules():
+            if isinstance(module, nn.Embedding):
+                embed_params = max(embed_params, module.weight.numel())
+
         self.stats.non_embed_params = self.stats.model_params - embed_params
 
     def _detect_gpu(self) -> Optional[str]:

@@ -1,72 +1,35 @@
 # experiments/exp_001_gqa_rope/config.yaml
-#
-# Experiment: GQA + RoPE, ~25M params
-#
-# DATA SETUP (run once before training):
-#   python -m engine.data.pretokenize \
-#       --dataset roneneldan/TinyStories \
-#       --tokenizer gpt2 \
-#       --hub_repo YOUR_HF_USERNAME/tinystories-gpt2 \
-#       --output_dir data/tinystories_gpt2
-#
-# Then set data_hub_repo below and vocab_size: 50257
-
 experiment:
   name: "exp_001_gqa_rope"
-  hub:
-    repo_id: "YOUR_HF_USERNAME/lm-forge-exp001"   # ← change this
-    push_every: 500
-    private: true
-    token_env: "HF_TOKEN"
 
 model:
-  vocab_size: 50257       # GPT-2 tokenizer — change if using a different tokenizer
+  vocab_size: 32000
   hidden_size: 512
-  num_layers: 6
-  max_seq_len: 1024
-
+  num_layers: 12
+  max_seq_len: 2048
   attention:
     type: "gqa"
     num_heads: 8
     num_kv_heads: 2
-    dropout: 0.0
-
   positional:
     type: "rope"
-    theta: 10000.0
-
   ffn:
     type: "swiglu"
-    intermediate_size: 1376
-    dropout: 0.0
-    bias: false
-
   norm:
     type: "rms"
-    eps: 1.0e-5
-
-  tie_word_embeddings: false
-  initializer_range: 0.02
 
 training:
-  max_steps: 10000
+  max_steps: 5000
   batch_size: 8
-  seq_len: 512
-  grad_accum: 4              # effective batch = 8 × 4 = 32 sequences
+  grad_accum: 4
   lr: 3.0e-4
-  weight_decay: 0.1
-  warmup_ratio: 0.04
-  max_grad_norm: 1.0
-  dtype: "bfloat16"          # bfloat16 on GPU; train.py auto-switches to float32 on CPU
-  backend: "auto"
-  log_every: 10
-  eval_every: 500
+  dtype: "bfloat16"
   save_every: 500
-  compile: false
-  fused_adamw: true          # ~5-10% faster on CUDA, auto-disabled on CPU/MPS
-  num_workers: -1            # -1 = auto-detect (0 on Windows, 2 in Colab, 4 elsewhere)
-  pin_memory: true           # auto-disabled on CPU
+  log_every: 50
 
-  # ── Data (set after running pretokenize.py) ──────────────────────────────
-  data_hub_repo: ""          # e.g. "YOUR_HF_USERNAME/tinystories-gpt2"
-  data_dir: ""               # local override — use if files already downloaded
+hub:
+  repo_id: "Kush26/lm-forge-exp001"
+  use_hub_checkpoints: true
+  checkpoint_limit: 2
+  push_every: 500
+  private: true

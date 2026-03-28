@@ -26,7 +26,7 @@ Round-trip:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from engine.config.schema import (
     ModelConfig,
@@ -73,6 +73,8 @@ try:
             positional__type: str = "rope",
             positional__theta: float = 10_000.0,
             positional__max_seq_len: int = 2048,
+            positional__scaling_type: Optional[str] = None,
+            positional__factor: float = 1.0,
             # ── ffn ────────────────────────────────────────────────────
             ffn__type: str = "swiglu",
             ffn__intermediate_size: int = 1376,
@@ -84,14 +86,17 @@ try:
             # ── misc ───────────────────────────────────────────────────
             tie_word_embeddings: bool = False,
             initializer_range: float = 0.02,
+            use_cache: bool = True,
             # ── HF required ────────────────────────────────────────────
-            bos_token_id: int | None = None,
-            eos_token_id: int | None = None,
+            bos_token_id: int = 0,
+            eos_token_id: int = 0,
+            pad_token_id: int = 0,
             **kwargs: Any,
         ) -> None:
             super().__init__(
                 bos_token_id=bos_token_id,
                 eos_token_id=eos_token_id,
+                pad_token_id=pad_token_id,
                 tie_word_embeddings=tie_word_embeddings,
                 **kwargs,
             )
@@ -114,6 +119,8 @@ try:
             self.positional__type = positional__type
             self.positional__theta = positional__theta
             self.positional__max_seq_len = positional__max_seq_len
+            self.positional__scaling_type = positional__scaling_type
+            self.positional__factor = positional__factor
 
             # ffn
             self.ffn__type = ffn__type
@@ -124,6 +131,8 @@ try:
             # norm
             self.norm__type = norm__type
             self.norm__eps = norm__eps
+
+            self.use_cache = use_cache
 
             # HF standard aliases for generation compatibility
             self.num_attention_heads = attention__num_heads
@@ -141,6 +150,9 @@ try:
                 max_seq_len=cfg.max_seq_len,
                 initializer_range=cfg.initializer_range,
                 tie_word_embeddings=cfg.tie_word_embeddings,
+                bos_token_id=cfg.bos_token_id,
+                eos_token_id=cfg.eos_token_id,
+                pad_token_id=cfg.pad_token_id,
                 attention__type=cfg.attention.type,
                 attention__num_heads=cfg.attention.num_heads,
                 attention__num_kv_heads=cfg.attention.num_kv_heads,
@@ -150,6 +162,8 @@ try:
                 positional__type=cfg.positional.type,
                 positional__theta=cfg.positional.theta,
                 positional__max_seq_len=cfg.positional.max_seq_len,
+                positional__scaling_type=cfg.positional.scaling_type,
+                positional__factor=cfg.positional.factor,
                 ffn__type=cfg.ffn.type,
                 ffn__intermediate_size=cfg.ffn.intermediate_size,
                 ffn__dropout=cfg.ffn.dropout,
@@ -167,6 +181,9 @@ try:
                 max_seq_len=self.max_seq_len,
                 initializer_range=self.initializer_range,
                 tie_word_embeddings=self.tie_word_embeddings,
+                bos_token_id=self.bos_token_id,
+                eos_token_id=self.eos_token_id,
+                pad_token_id=self.pad_token_id,
                 attention=AttentionConfig(
                     type=self.attention__type,
                     num_heads=self.attention__num_heads,
@@ -179,6 +196,8 @@ try:
                     type=self.positional__type,
                     theta=self.positional__theta,
                     max_seq_len=self.positional__max_seq_len,
+                    scaling_type=self.positional__scaling_type,
+                    factor=self.positional__factor,
                 ),
                 ffn=FFNConfig(
                     type=self.ffn__type,

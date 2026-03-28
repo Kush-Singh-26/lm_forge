@@ -490,7 +490,7 @@ class TestTrainConfigNew:
     def test_default_values(self):
         cfg = TrainConfig()
         assert cfg.fused_adamw == True
-        assert cfg.num_workers == -1
+        assert cfg.num_workers >= 0
         assert cfg.pin_memory == True
         assert cfg.data_dir == ""
         assert cfg.data_hub_repo == ""

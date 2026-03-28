@@ -30,9 +30,20 @@ try:
             mask_token="<MASK>",
             **kwargs,
         ):
-            self.bpe = (
-                BPETokenizer.load(tokenizer_file) if tokenizer_file else BPETokenizer()
-            )
+            # Load BPE if a file is provided
+            if tokenizer_file and Path(tokenizer_file).exists():
+                self.bpe = BPETokenizer.load(tokenizer_file)
+            else:
+                self.bpe = BPETokenizer(
+                    special_tokens=[
+                        pad_token,
+                        unk_token,
+                        bos_token,
+                        eos_token,
+                        mask_token,
+                    ]
+                )
+
             super().__init__(
                 bos_token=bos_token,
                 eos_token=eos_token,
@@ -50,22 +61,28 @@ try:
             return self.bpe.vocab.copy()
 
         def _tokenize(self, text: str) -> List[str]:
-            # BPETokenizer.encode returns IDs, but _tokenize should return tokens
-            # This is a bit inefficient for our BPE which merges strings directly
-            # We'll re-implement string-based tokenization if needed, but for now:
+            # Use string-based tokenization by encoding and then decoding IDs to tokens
             ids = self.bpe.encode(text)
             return [self.bpe.vocab_inv[i] for i in ids]
 
         def _convert_token_to_id(self, token: str) -> int:
-            return self.bpe.vocab.get(token, self.bpe.special_tokens.get("<UNK>", 1))
+            return self.bpe.vocab.get(token, self.unk_token_id)
 
         def _convert_id_to_token(self, index: int) -> str:
-            return self.bpe.vocab_inv.get(index, "<UNK>")
+            return self.bpe.vocab_inv.get(index, self.unk_token)
 
         def convert_tokens_to_string(self, tokens: List[str]) -> str:
-            # BPETokenizer.decode works on IDs
-            ids = [self.vocab.get(t, self.unk_token_id) for t in tokens]
-            return self.bpe.decode(ids)
+            # Reconstruct the string from tokens
+            byte_list: List[int] = []
+            special_tokens_set = set(self.all_special_tokens)
+
+            for tok in tokens:
+                if tok in special_tokens_set:
+                    continue
+                for ch in tok:
+                    byte_list.append(self.bpe.byte_decoder[ch])
+
+            return bytes(byte_list).decode("utf-8", errors="replace")
 
         def save_vocabulary(
             self, save_directory: str, filename_prefix: Optional[str] = None

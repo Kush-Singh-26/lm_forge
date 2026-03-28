@@ -2,12 +2,12 @@
 engine/data/hf_utils.py
 
 Utilities for preparing Hugging Face datasets for training.
-Includes tokenization and native packing (concatenate and chunk).
+Includes tokenization and vectorized packing (concatenate and chunk) using NumPy.
 """
 
 from __future__ import annotations
 from typing import Optional
-import itertools
+import numpy as np
 
 
 def prepare_dataset(
@@ -21,14 +21,12 @@ def prepare_dataset(
 ):
     """
     Tokenize and pack a HF dataset into fixed-length chunks.
-
-    This uses the 'concatenate and chunk' strategy which is the standard
-    way to train causal language models efficiently.
+    Uses NumPy for high-performance vectorized packing.
     """
     if num_proc is None:
         import os
 
-        num_proc = min(4, os.cpu_count() or 1)
+        num_proc = os.cpu_count() or 1
 
     def tokenize_function(examples):
         texts = examples[text_column]
@@ -46,27 +44,26 @@ def prepare_dataset(
         desc="Tokenizing dataset",
     )
 
-    # 2. Pack (group texts into seq_len chunks)
+    # 2. Vectorized Packing
     def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {
-            k: list(itertools.chain(*examples[k])) for k in examples.keys()
-        }
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # Concatenate tokens across the batch using NumPy (much faster for large integer arrays)
+        concatenated = {k: np.concatenate(examples[k]) for k in examples.keys()}
 
-        # We drop the small remainder, we could add padding if the model supported it
-        # but packing is usually done with dropping the last bit.
-        if total_length >= seq_len:
-            total_length = (total_length // seq_len) * seq_len
+        # Calculate how many full sequences we can make
+        first_key = list(examples.keys())[0]
+        total_length = len(concatenated[first_key])
 
-        # Split into chunks of max_len.
+        if total_length < seq_len:
+            return {k: [] for k in examples.keys()}
+
+        num_full = (total_length // seq_len) * seq_len
+
+        # Slice and reshape for O(1) view-based chunking
         result = {
-            k: [t[i : i + seq_len] for i in range(0, total_length, seq_len)]
-            for k, t in concatenated_examples.items()
+            k: concatenated[k][:num_full].reshape(-1, seq_len).tolist()
+            for k in concatenated.keys()
         }
-        # For CausalLM, labels are typically input_ids shifted.
-        # HF Trainer handles shifting internally if 'labels' are provided.
-        result["labels"] = result["input_ids"].copy()
+
         return result
 
     packed_ds = tokenized_ds.map(

@@ -2,37 +2,6 @@
 engine/config/schema.py
 
 Nested, YAML-loadable config.  Every field maps directly to a config.yaml key.
-Nested sections (attention, positional, ffn, norm) each carry a `type` field
-that the component registries use to pick the right implementation.
-
-Example config.yaml structure:
-    experiment:
-      name: "exp_001"
-      hub:
-        repo_id: "your-name/lm-forge-exp001"
-        push_every: 500
-    model:
-      vocab_size: 32000
-      hidden_size: 512
-      num_layers: 6
-      attention:
-        type: "gqa"
-        num_heads: 8
-        num_kv_heads: 2
-      positional:
-        type: "rope"
-        theta: 10000.0
-      ffn:
-        type: "swiglu"
-        intermediate_size: 1376
-      norm:
-        type: "rms"
-        eps: 1e-5
-    training:
-      max_steps: 10000
-      batch_size: 8
-      grad_accum: 4
-      lr: 3e-4
 """
 
 from __future__ import annotations
@@ -58,23 +27,12 @@ class AttentionConfig:
     # sliding window only
     window_size: int = 512
     # Flash Attention 2 (requires: pip install flash-attn --no-build-isolation)
-    # Only supported on CUDA with fp16/bf16.  Set dtype accordingly.
     flash_attn: bool = False
 
     def __post_init__(self):
         if self.type == "mqa":
-            if getattr(self, "num_kv_heads", 1) != 1:
-                import logging
-                logging.getLogger("lm_forge").warning(
-                    f"Attention type is 'mqa', forcing num_kv_heads=1 (was {self.num_kv_heads})"
-                )
             self.num_kv_heads = 1
         if self.type == "mha":
-            if getattr(self, "num_kv_heads", self.num_heads) != self.num_heads:
-                import logging
-                logging.getLogger("lm_forge").warning(
-                    f"Attention type is 'mha', forcing num_kv_heads={self.num_heads} (was {self.num_kv_heads})"
-                )
             self.num_kv_heads = self.num_heads
         assert self.num_heads % self.num_kv_heads == 0, (
             f"num_heads ({self.num_heads}) must be divisible by "
@@ -87,6 +45,9 @@ class PositionalConfig:
     type: str = "rope"  # "rope" | "alibi" | "learned" | "none"
     # RoPE
     theta: float = 10_000.0
+    # RoPE Scaling (NTK-aware)
+    scaling_type: Optional[str] = None  # None | "ntk"
+    factor: float = 1.0
     # Learned absolute — matches max_seq_len of model
     max_seq_len: int = 2048
 
@@ -123,17 +84,34 @@ class ModelConfig:
     tie_word_embeddings: bool = False
     initializer_range: float = 0.02
 
+    # ── tokens ───────────────────────────────────────────────────────────
+    # Token IDs (defaults to SmolLM tokenizer)
+    bos_token_id: int = 0
+    eos_token_id: int = 0
+    pad_token_id: int = 0
+
     # ── derived (auto-computed, not set in YAML) ─────────────────────────
     head_dim: int = 0
 
     def __post_init__(self):
-        # Cascade max_seq_len into positional config if not explicitly set
+        # Cascade max_seq_len into positional config if it hasn't been explicitly changed
+        # or if the model's max_seq_len was explicitly changed but positional wasn't.
         if self.positional.max_seq_len == 2048 and self.max_seq_len != 2048:
             self.positional.max_seq_len = self.max_seq_len
-        assert self.hidden_size % self.attention.num_heads == 0, (
-            "hidden_size must be divisible by num_heads"
-        )
-        self.head_dim = self.hidden_size // self.attention.num_heads
+
+        # Ensure hidden_size is divisible by num_heads
+        if self.attention.num_heads > 0:
+            assert self.hidden_size % self.attention.num_heads == 0, (
+                f"hidden_size ({self.hidden_size}) must be divisible by "
+                f"num_heads ({self.attention.num_heads})"
+            )
+            self.head_dim = self.hidden_size // self.attention.num_heads
+
+            if self.positional.type == "rope":
+                assert self.head_dim % 2 == 0, (
+                    f"head_dim ({self.head_dim}) must be even for RoPE. "
+                    f"Check hidden_size ({self.hidden_size}) and num_heads ({self.attention.num_heads})."
+                )
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -163,31 +141,28 @@ class TrainConfig:
     compile: bool = False
 
     # ── DataLoader ───────────────────────────────────────────────────────────
-    # None = auto-detect (0 on Windows, 2 in Colab, 4 elsewhere)
     num_workers: int = -1  # -1 = auto-detect
-    pin_memory: bool = True  # auto-disabled on CPU in DeviceManager
+    pin_memory: bool = True
 
     # ── Optimizer ────────────────────────────────────────────────────────────
-    # fused AdamW: ~5-10% faster on CUDA, requires torch >= 2.0.
-    # Automatically disabled on CPU/MPS where it's not supported.
     fused_adamw: bool = True
 
     # ── HF Native ────────────────────────────────────────────────────────────
-    # Dictionary of keyword arguments passed directly to transformers.TrainingArguments
-    # when using the HF trainer. e.g. { "bf16": True, "optim": "adamw_torch_fused" }
     hf_args: dict[str, Any] = field(default_factory=dict)
 
     # ── Data ─────────────────────────────────────────────────────────────────
-    # Path to a pre-tokenized dataset directory (train.bin + val.bin + meta.json)
-    # produced by engine/data/pretokenize.py.
-    # Leave empty to use the experiment's own dataset code.
     data_dir: str = ""
-    # HF Hub dataset repo to pull from if data_dir files are missing.
     data_hub_repo: str = ""
+    shuffle_buffer: int = 10000  # Size of the streaming shuffle buffer
+    tokenizer_name: str = "HuggingFaceTB/SmolLM-135M"
 
     def __post_init__(self):
         if isinstance(self.betas, list):
             self.betas = tuple(self.betas)
+        if self.num_workers == -1:
+            import os
+
+            self.num_workers = os.cpu_count() or 0
 
     @property
     def warmup_steps(self) -> int:
@@ -201,9 +176,21 @@ class TrainConfig:
 @dataclass
 class HubConfig:
     repo_id: str = ""  # "username/repo-name" — empty = no push
-    push_every: int = 500  # push checkpoint every N opt steps
+    use_hub_checkpoints: bool = True
+    checkpoint_limit: int = 2
+    push_every: int = 500
     private: bool = True
-    token_env: str = "HF_TOKEN"  # env var name for the HF write token
+    token_env: str = "HF_TOKEN"
+
+
+@dataclass
+class LoggingConfig:
+    report_to: list[str] = field(
+        default_factory=lambda: ["none"]
+    )  # ["wandb", "tensorboard"]
+    wandb_project: str = "lm_forge"
+    wandb_entity: Optional[str] = None
+    log_model: str = "checkpoint"  # "checkpoint" | "end" | "none"
 
 
 @dataclass
@@ -212,26 +199,11 @@ class ExperimentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     training: TrainConfig = field(default_factory=TrainConfig)
     hub: HubConfig = field(default_factory=HubConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def validate(self) -> None:
         m = self.model
         t = self.training
-        
-        import logging
-        logger = logging.getLogger("lm_forge")
-
-        if m.positional.type == "alibi" and m.attention.flash_attn:
-            logger.warning(
-                "Flash Attention 2 does not support ALiBi biases. "
-                "Will silently fall back to PyTorch SDPA slower kernels!"
-            )
-        
-        if m.attention.type == "sliding" and m.attention.flash_attn:
-            logger.warning(
-                "Sliding window attention currently does not use Flash Attention in this implementation. "
-                "flash_attn=True will be ignored."
-            )
-
         if m.num_layers < 1:
             raise ValueError("num_layers must be >= 1")
         if m.vocab_size < 1:
@@ -242,12 +214,16 @@ class ExperimentConfig:
             raise ValueError("batch_size must be >= 1")
         if t.seq_len < 1:
             raise ValueError("seq_len must be >= 1")
-        if m.ffn.intermediate_size <= 0:
-            raise ValueError("intermediate_size must be > 0")
         if t.seq_len > m.max_seq_len:
             raise ValueError(
                 f"training.seq_len ({t.seq_len}) exceeds model.max_seq_len "
                 f"({m.max_seq_len}). Increase max_seq_len or reduce seq_len."
+            )
+
+        if m.attention.flash_attn and m.positional.type == "alibi":
+            raise ValueError(
+                "Flash Attention 2 does not natively support additive bias (ALiBi). "
+                "Disable flash_attn or use RoPE instead."
             )
 
 
@@ -256,55 +232,53 @@ class ExperimentConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _merge(dataclass_instance, overrides: dict) -> None:
+def _merge(dataclass_instance, overrides: dict, prefix: str = "") -> list[str]:
     """
-    Recursively apply a dict of overrides to a dataclass instance in-place.
-    Unknown keys are silently ignored so future YAML fields don't break old
-    engine versions.
+    Recursively merge overrides into a dataclass.
+    Returns a list of unknown keys found.
     """
-    import warnings
-    fields = {f.name: f for f in dataclass_instance.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-
+    fields = {f.name: f for f in dataclass_instance.__dataclass_fields__.values()}
+    unknown_keys = []
     for key, value in overrides.items():
+        full_key = f"{prefix}.{key}" if prefix else key
         if key not in fields:
-            warnings.warn(f"Unrecognised config key: '{key}' in {dataclass_instance.__class__.__name__}")
+            unknown_keys.append(full_key)
             continue
         current = getattr(dataclass_instance, key)
         if hasattr(current, "__dataclass_fields__") and isinstance(value, dict):
-            _merge(current, value)
+            unknown_keys.extend(_merge(current, value, prefix=full_key))
         else:
             setattr(dataclass_instance, key, value)
-
-    # Re-run __post_init__ if present to recompute derived fields
     if hasattr(dataclass_instance, "__post_init__"):
         dataclass_instance.__post_init__()
+    return unknown_keys
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
-    """
-    Load an ExperimentConfig from a YAML file.
-
-    Missing keys fall back to dataclass defaults, so a minimal config.yaml
-    only needs to specify the fields that differ from defaults.
-    """
     raw: dict[str, Any] = yaml.safe_load(Path(path).read_text()) or {}
-
     cfg = ExperimentConfig()
+    unknown = []
     if "experiment" in raw:
         exp_raw = dict(raw["experiment"])
         cfg.name = exp_raw.pop("name", cfg.name)
-        # Still support the old fallback in case people put hub under experiment
         if "hub" in exp_raw:
-            _merge(cfg.hub, exp_raw["hub"])
-
+            unknown.extend(_merge(cfg.hub, exp_raw["hub"], prefix="experiment.hub"))
     if "model" in raw:
-        _merge(cfg.model, raw["model"])
-
+        unknown.extend(_merge(cfg.model, raw["model"], prefix="model"))
     if "training" in raw:
-        _merge(cfg.training, raw["training"])
-
+        unknown.extend(_merge(cfg.training, raw["training"], prefix="training"))
     if "hub" in raw:
-        _merge(cfg.hub, raw["hub"])
+        unknown.extend(_merge(cfg.hub, raw["hub"], prefix="hub"))
+    if "logging" in raw:
+        unknown.extend(_merge(cfg.logging, raw["logging"], prefix="logging"))
+
+    if unknown:
+        import warnings
+
+        warnings.warn(
+            f"Found unknown configuration keys in YAML: {', '.join(unknown)}. "
+            "These will be ignored. Check for typos!"
+        )
 
     cfg.validate()
     return cfg

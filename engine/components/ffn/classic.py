@@ -36,7 +36,9 @@ class ClassicFFN(nn.Module):
 
         self.fc1 = nn.Linear(d, h, bias=cfg.ffn.bias)
         self.fc2 = nn.Linear(h, d, bias=cfg.ffn.bias)
-        self.drop = nn.Dropout(cfg.ffn.dropout) if cfg.ffn.dropout > 0 else nn.Identity()
+        self.drop = (
+            nn.Dropout(cfg.ffn.dropout) if cfg.ffn.dropout > 0 else nn.Identity()
+        )
 
         # PEFT aliases — point to the same objects so target_modules="gate_proj"
         # or "down_proj" still hit the right weights
@@ -44,4 +46,4 @@ class ClassicFFN(nn.Module):
         self.down_proj = self.fc2
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.drop(self.fc2(F.gelu(self.fc1(x))))
+        return self.drop(self.fc2(F.gelu(self.fc1(x), approximate="tanh")))

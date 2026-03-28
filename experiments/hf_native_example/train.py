@@ -1,122 +1,95 @@
 """
 experiments/hf_native_example/train.py
 
-Simplified training entry point demonstrating HF-native usage.
-Usage:
-    python experiments/hf_native_example/train.py --steps 100 --cpu
+Example of using the HF Trainer + ProfilingCallback + HubCheckpointCallback.
 """
 
 from __future__ import annotations
-import argparse
+import os
 import sys
-import torch
 from pathlib import Path
 
-# Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from datasets import load_dataset
-from transformers import AutoTokenizer, TrainingArguments, Trainer as HFTrainer
+import torch
+from transformers import (
+    AutoTokenizer,
+    TrainingArguments,
+    Trainer as HFTrainer,
+    DataCollatorForLanguageModeling,
+)
 
-from engine import load_experiment_config, HFCausalLM, prepare_dataset
+from engine import load_experiment_config, HFCausalLM, prepare_dataset, SyntheticDataset
 from engine.config.hf_config import LMForgeConfig
-from engine.utils import ProfilingCallback
+from engine.utils import ProfilingCallback, HubCheckpointCallback, HubCheckpointManager
 
 
 def main():
+    import argparse
+
     p = argparse.ArgumentParser()
     p.add_argument("--steps", type=int, default=None)
     p.add_argument("--cpu", action="store_true")
     args = p.parse_args()
 
-    # 1. Load Config
     cfg_path = Path(__file__).parent / "config.yaml"
     exp = load_experiment_config(cfg_path)
 
     if args.steps:
         exp.training.max_steps = args.steps
     if args.cpu:
-        exp.training.backend = "cpu"
         exp.training.dtype = "float32"
 
-    print(f"--- Experiment: {exp.name} ---")
-
-    # 2. Prepare Model
-    HFCausalLM.register()
-    hf_cfg = LMForgeConfig.from_model_config(exp.model)
-    hf_cfg.use_cache = False  # Disable cache during training
-    model = HFCausalLM(hf_cfg)
-    model.lm.model.enable_gradient_checkpointing()
-    print(f"Model parameters: {model.num_parameters():,}")
-
-    # 3. Prepare Data
-    print("Loading TinyStories dataset...")
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
+    # 1. Tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("HuggingFaceTB/SmolLM-135M")
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    raw_train = load_dataset(
-        "roneneldan/TinyStories", split="train[:1%]"
-    )  # small slice for demo
-    raw_eval = load_dataset("roneneldan/TinyStories", split="validation[:1%]")
+    # 2. Model
+    HFCausalLM.register()
+    hf_cfg = LMForgeConfig.from_model_config(exp.model)
+    model = HFCausalLM(hf_cfg)
 
-    train_ds = prepare_dataset(raw_train, tokenizer, seq_len=exp.training.seq_len)
-    eval_ds = prepare_dataset(raw_eval, tokenizer, seq_len=exp.training.seq_len)
+    # 3. Data
+    train_ds = SyntheticDataset(1000, exp.training.seq_len, exp.model.vocab_size)
 
-    # 4. HF Training Arguments
-    training_args_dict = dict(
-        output_dir=f"checkpoints/{exp.name}",
+    # 4. Training Arguments
+    output_dir = f"checkpoints/{exp.name}"
+    training_args = TrainingArguments(
+        output_dir=output_dir,
         max_steps=exp.training.max_steps,
         per_device_train_batch_size=exp.training.batch_size,
         gradient_accumulation_steps=exp.training.grad_accum,
         learning_rate=exp.training.lr,
-        warmup_ratio=exp.training.warmup_ratio,
         bf16=(exp.training.dtype == "bfloat16"),
-        fp16=(exp.training.dtype == "float16"),
+        logging_steps=exp.training.log_every,
+        save_steps=exp.training.save_every,
+        report_to=["none"],
         push_to_hub=False,
-        gradient_checkpointing=True,
-        dataloader_drop_last=True,
     )
-    # Merge with YAML hf_args
-    training_args_dict.update(exp.training.hf_args)
 
-    training_args = TrainingArguments(**training_args_dict)
-
-    # 5. Train
-    trainer = HFTrainer(
+    # 5. Trainer
+    callbacks = [ProfilingCallback(), HubCheckpointCallback(exp)]
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    hf_trainer = HFTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        eval_dataset=eval_ds,
-        processing_class=tokenizer,
-        callbacks=[ProfilingCallback()],
-    )
-
-    print("Starting training...")
-    trainer.train()
-
-    print("Saving model...")
-    final_path = f"checkpoints/{exp.name}/final"
-    trainer.save_model(final_path)
-
-    # 6. Test Generation
-    print("\n--- Testing Generation ---")
-    from transformers import pipeline
-
-    # Use the saved model and tokenizer
-    gen = pipeline(
-        "text-generation",
-        model=final_path,
+        data_collator=data_collator,
+        callbacks=callbacks,
         tokenizer=tokenizer,
-        device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
-    prompt = "Once upon a time,"
-    print(f"Prompt: {prompt}")
-    output = gen(prompt, max_new_tokens=30, do_sample=True, temperature=0.7)
-    print(f"Output: {output[0]['generated_text']}")
+    # 6. Resume
+    resume_from = None
+    if exp.hub.use_hub_checkpoints:
+        manager = HubCheckpointManager(exp.hub, exp)
+        downloaded = manager.pull_latest(output_dir)
+        if downloaded:
+            resume_from = str(downloaded)
 
-    print("\nDone!")
+    # 7. Train
+    hf_trainer.train(resume_from_checkpoint=resume_from)
 
 
 if __name__ == "__main__":

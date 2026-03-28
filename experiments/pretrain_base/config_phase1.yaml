@@ -2,11 +2,6 @@
 #
 # Phase 1: Pretrain on fineweb-edu (general knowledge & reasoning)
 # Target: ~10B tokens, ~38,000 steps
-#
-# Usage:
-#   python experiments/pretrain_base/train.py --phase 1
-#   python experiments/pretrain_base/train.py --phase 1 --t4        # T4 override
-#   python experiments/pretrain_base/train.py --phase 1 --smoke     # CPU smoke test
 
 experiment:
   name: "pretrain_phase1"
@@ -17,6 +12,9 @@ model:
   num_layers: 20
   max_seq_len: 1024
   tie_word_embeddings: true
+  bos_token_id: 0
+  eos_token_id: 0
+  pad_token_id: 0
 
   attention:
     type: "gqa"
@@ -60,9 +58,9 @@ training:
 
   # HF-specific overrides
   hf_args:
-    report_to: ["none"]
+    report_to: ["wandb"]
     run_name: "pretrain_phase1"
-    save_total_limit: 5
+    save_total_limit: 2
     optim: "adamw_torch_fused"
     lr_scheduler_type: "cosine"
     warmup_steps: 2000
@@ -73,9 +71,12 @@ training:
   # Data
   data_hub_repo: ""
   data_dir: ""
+  shuffle_buffer: 10000      # Size of the streaming shuffle buffer (memory vs. randomness)
 
 # Hub (set your repo to push checkpoints)
 hub:
-  repo_id: ""
-  push_every: 0
+  repo_id: "your-username/lm-forge-160m"  # Update this to your HF repo!
+  use_hub_checkpoints: true
+  checkpoint_limit: 2
+  push_every: 1000
   private: true

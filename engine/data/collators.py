@@ -45,27 +45,36 @@ class CLMCollator:
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         input_ids_list = [b["input_ids"] for b in batch]
         labels_list = [b.get("labels", b["input_ids"]) for b in batch]
+        attn_mask_list = [b.get("attention_mask") for b in batch]
 
-        # Truncate if needed
-        if self.max_seq_len is not None:
-            input_ids_list = [x[: self.max_seq_len] for x in input_ids_list]
-            labels_list = [x[: self.max_seq_len] for x in labels_list]
+        # Truncate and convert to tensors if they aren't already
+        def to_tensor(x, dtype=torch.long):
+            if isinstance(x, torch.Tensor):
+                return x[: self.max_seq_len] if self.max_seq_len else x
+            t = torch.tensor(x, dtype=dtype)
+            return t[: self.max_seq_len] if self.max_seq_len else t
 
-        max_len = max(len(x) for x in input_ids_list)
+        input_ids_tensors = [to_tensor(x) for x in input_ids_list]
+        labels_tensors = [to_tensor(x) for x in labels_list]
 
-        input_ids = torch.full((len(batch), max_len), self.pad_id, dtype=torch.long)
-        labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
-        attn_mask = torch.zeros((len(batch), max_len), dtype=torch.long)
+        # Use pad_sequence for efficient padding
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids_tensors, batch_first=True, padding_value=self.pad_id
+        )
+        labels = torch.nn.utils.rnn.pad_sequence(
+            labels_tensors, batch_first=True, padding_value=-100
+        )
 
-        for i, (ids, lbls) in enumerate(zip(input_ids_list, labels_list)):
-            n = len(ids)
-            input_ids[i, :n] = (
-                ids if isinstance(ids, torch.Tensor) else torch.tensor(ids)
-            )
-            labels[i, :n] = (
-                lbls if isinstance(lbls, torch.Tensor) else torch.tensor(lbls)
-            )
-            attn_mask[i, :n] = 1
+        B, max_len = input_ids.shape
+        attn_mask = torch.zeros((B, max_len), dtype=torch.long)
+
+        for i, mask in enumerate(attn_mask_list):
+            n = len(input_ids_tensors[i])
+            if mask is not None:
+                m = to_tensor(mask)
+                attn_mask[i, : len(m)] = m
+            else:
+                attn_mask[i, :n] = 1
 
         return {"input_ids": input_ids, "labels": labels, "attention_mask": attn_mask}
 
@@ -103,53 +112,57 @@ class MLMCollator:
 
     def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         input_ids_list = [b["input_ids"] for b in batch]
-        if self.max_seq_len is not None:
-            input_ids_list = [x[: self.max_seq_len] for x in input_ids_list]
 
-        max_len = max(len(x) for x in input_ids_list)
-        n_samples = len(batch)
+        def to_tensor(x):
+            t = x if isinstance(x, torch.Tensor) else torch.tensor(x, dtype=torch.long)
+            return t[: self.max_seq_len] if self.max_seq_len else t
 
-        input_ids = torch.full((n_samples, max_len), self.pad_id, dtype=torch.long)
-        attn_mask = torch.zeros((n_samples, max_len), dtype=torch.long)
+        input_ids_tensors = [to_tensor(x) for x in input_ids_list]
+        input_ids = torch.nn.utils.rnn.pad_sequence(
+            input_ids_tensors, batch_first=True, padding_value=self.pad_id
+        )
 
-        for i, ids in enumerate(input_ids_list):
-            n = len(ids)
-            input_ids[i, :n] = (
-                ids if isinstance(ids, torch.Tensor) else torch.tensor(ids)
-            )
-            attn_mask[i, :n] = 1
+        B, max_len = input_ids.shape
+        attn_mask = torch.zeros((B, max_len), dtype=torch.long)
+        for i, t in enumerate(input_ids_tensors):
+            attn_mask[i, : len(t)] = 1
 
         # ── Masking ───────────────────────────────────────────────────────
         labels = input_ids.clone()
-        prob_mat = torch.full(input_ids.shape, self.mask_prob)
 
-        # Never mask padding or special tokens
-        for sid in self.special_ids:
-            prob_mat[input_ids == sid] = 0.0
-        prob_mat[attn_mask == 0] = 0.0
+        # Use random matrix instead of multiple bernoulli calls
+        rand = torch.rand(input_ids.shape)
+        masked_indices = (rand < self.mask_prob) & (attn_mask == 1)
 
-        masked_indices = torch.bernoulli(prob_mat).bool()
+        # Never mask special tokens
+        special_token_mask = torch.isin(
+            input_ids, torch.tensor(list(self.special_ids), device=input_ids.device)
+        )
+        masked_indices &= ~special_token_mask
 
         # Labels: -100 everywhere except masked positions
         labels[~masked_indices] = -100
 
+        # Sub-masking: Of masked tokens, 80% [MASK], 10% random, 10% unchanged
+        # Generate another random matrix for those masked positions
+        rand_mask = torch.rand(input_ids.shape)
+
         # 80% → [MASK]
-        replace_mask = (
-            torch.bernoulli(torch.full(input_ids.shape, 0.8)).bool() & masked_indices
-        )
+        replace_mask = masked_indices & (rand_mask < 0.8)
         input_ids[replace_mask] = self.mask_token_id
 
-        # 10% → random token  (of the remaining 20%)
-        random_indices = (
-            torch.bernoulli(torch.full(input_ids.shape, 0.5)).bool()
-            & masked_indices
-            & ~replace_mask
-        )
-        random_tokens = torch.randint(
-            self._min_random_id, self.vocab_size, input_ids.shape, dtype=torch.long
-        )
-        input_ids[random_indices] = random_tokens[random_indices]
+        # 10% → random token (0.8 <= rand_mask < 0.9)
+        random_indices = masked_indices & (rand_mask >= 0.8) & (rand_mask < 0.9)
+        num_random = random_indices.sum().item()
+        if num_random > 0:
+            random_tokens = torch.randint(
+                self._min_random_id,
+                self.vocab_size,
+                (num_random,),
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+            input_ids[random_indices] = random_tokens
 
-        # 10% → unchanged (already is — nothing to do)
-
+        # 10% → unchanged (already is)
         return {"input_ids": input_ids, "labels": labels, "attention_mask": attn_mask}

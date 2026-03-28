@@ -2,11 +2,12 @@
 engine/utils/hf_callbacks.py
 
 HF Trainer Callbacks for lm_forge.
-Includes ProfilingCallback for MFU, throughput, and memory tracking.
+Includes ProfilingCallback and HubCheckpointCallback.
 """
 
 from __future__ import annotations
 import time
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -18,14 +19,12 @@ try:
         TrainerControl,
     )
     from engine.utils.profiler import ProfilerStats, Profiler
+    from engine.utils.hub_checkpoint_utils import HubCheckpointManager
+    from engine.config.schema import ExperimentConfig
 
     class ProfilingCallback(TrainerCallback):
         """
         HF Trainer Callback that tracks MFU, throughput, and memory.
-        Results are logged to the Trainer's log_history and printed to console.
-
-        Timing: measures wall-clock between consecutive on_step_end calls,
-        which fires once per optimizer step (after all grad_accum micro-batches).
         """
 
         def __init__(self, warmup_steps: int = 5, seq_len: Optional[int] = None):
@@ -45,15 +44,15 @@ try:
             if model is None:
                 return
 
-            # Initialize profiler using Trainer's config
-            # We use effective_batch_size because on_step_end fires once per
-            # optimizer step (after all grad_accum micro-batches).
             batch_size = (
                 args.per_device_train_batch_size * args.gradient_accumulation_steps
             )
 
-            # Try to find seq_len in override, model config, or fallback
-            seq_len = self.seq_len_override if self.seq_len_override else getattr(model.config, "max_seq_len", 512)
+            seq_len = (
+                self.seq_len_override
+                if self.seq_len_override
+                else getattr(model.config, "max_seq_len", 512)
+            )
 
             self.profiler = Profiler(
                 model=model,
@@ -82,7 +81,6 @@ try:
 
             self.profiler._step_count += 1
             if self.profiler._step_count > self.profiler.warmup_steps:
-                # Measure time between consecutive optimizer-step completions
                 if self._prev_step_end_time is not None:
                     elapsed_ms = (now - self._prev_step_end_time) * 1000
                     self.profiler.stats.step_times_ms.append(elapsed_ms)
@@ -106,14 +104,70 @@ try:
                 report = self.profiler.report(step=state.global_step)
                 print(f"  ↳ {report}")
 
-                # Inject metrics into state for WandB/Tensorboard
                 summary = self.profiler.summary()
                 for k, v in summary.items():
                     if isinstance(v, (int, float)):
                         state.log_history[-1][f"perf/{k}"] = v
 
+    class HubCheckpointCallback(TrainerCallback):
+        """
+        HF Trainer Callback that syncs checkpoints to the Hugging Face Hub as folders.
+        Keeps only the most recent N checkpoints on the Hub.
+        """
+
+        def __init__(self, exp_cfg: ExperimentConfig):
+            self.exp_cfg = exp_cfg
+            self.manager = HubCheckpointManager(exp_cfg.hub, exp_cfg)
+
+        def on_save(
+            self,
+            args: TrainingArguments,
+            state: TrainerState,
+            control: TrainerControl,
+            **kwargs,
+        ):
+            """Called whenever the Trainer saves a checkpoint locally."""
+            if not self.manager._enabled or not self.exp_cfg.hub.use_hub_checkpoints:
+                return
+
+            checkpoint_path = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+            if checkpoint_path.exists():
+                print(
+                    f"[HubCheckpointCallback] Step {state.global_step}: Uploading FULL STATE to Hub..."
+                )
+                try:
+                    self.manager.upload_checkpoint(checkpoint_path, state.global_step)
+                    # Prune remote checkpoints (keep N)
+                    self.manager.prune_checkpoints(
+                        keep=self.exp_cfg.hub.checkpoint_limit
+                    )
+                except Exception as e:
+                    print(f"[HubCheckpointCallback] ERROR: Hub sync failed: {e}")
+
+        def on_train_end(
+            self,
+            args: TrainingArguments,
+            state: TrainerState,
+            control: TrainerControl,
+            **kwargs,
+        ):
+            if not self.manager._enabled or not self.exp_cfg.hub.use_hub_checkpoints:
+                return
+
+            final_path = Path(args.output_dir) / "final"
+            if final_path.exists():
+                print(f"[HubCheckpointCallback] Syncing final model to Hub...")
+                try:
+                    self.manager.push_final(final_path)
+                except Exception as e:
+                    print(f"[HubCheckpointCallback] ERROR: Final sync failed: {e}")
+
 except ImportError:
 
     class ProfilingCallback:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    class HubCheckpointCallback:
         def __init__(self, *args, **kwargs):
             pass

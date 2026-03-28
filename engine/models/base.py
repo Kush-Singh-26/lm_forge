@@ -28,11 +28,31 @@ class BaseLM(nn.Module):
     def _init_weights(self, module: nn.Module) -> None:
         std = self.config.initializer_range
         if isinstance(module, nn.Linear):
+            # Special scaling for residual projections (GPT-2 style)
+            # This helps keep the variance of the hidden states stable at depth.
+            is_residual = False
+            for name, m in self.named_modules():
+                if m is module:
+                    # Heuristic: these names are standard across our attention/ffn components
+                    if any(x in name for x in ["o_proj", "down_proj", "fc2"]):
+                        is_residual = True
+                    break
+
+            if is_residual:
+                # Scaled initialization: 0.02 / sqrt(2 * num_layers)
+                std = std / (2 * self.config.num_layers) ** 0.5
+
             nn.init.normal_(module.weight, mean=0.0, std=std)
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=std)
+        elif isinstance(module, (nn.LayerNorm, nn.GroupNorm)):
+            # Standard norm init
+            if module.weight is not None:
+                nn.init.ones_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
 
     def post_init(self) -> None:
         """Call at end of __init__ in every concrete subclass."""
@@ -53,6 +73,7 @@ class BaseLM(nn.Module):
         self.config.save(directory)
         try:
             from safetensors.torch import save_file
+
             save_file(self.state_dict(), directory / "model.safetensors")
         except ImportError:
             torch.save(self.state_dict(), directory / "pytorch_model.bin")
@@ -66,23 +87,54 @@ class BaseLM(nn.Module):
     ) -> "BaseLM":
         import json
         from dataclasses import asdict
+
         path = Path(path)
         if config is None:
             raw = json.loads((path / "model_config.json").read_text())
             # Rebuild nested dataclasses
             from engine.config.schema import (
-                ModelConfig, AttentionConfig, PositionalConfig, FFNConfig, NormConfig
+                ModelConfig,
+                AttentionConfig,
+                PositionalConfig,
+                FFNConfig,
+                NormConfig,
             )
-            raw["attention"]  = AttentionConfig(**{k: v for k, v in raw.get("attention",{}).items()
-                                                    if k in AttentionConfig.__dataclass_fields__})
-            raw["positional"] = PositionalConfig(**{k: v for k, v in raw.get("positional",{}).items()
-                                                     if k in PositionalConfig.__dataclass_fields__})
-            raw["ffn"]  = FFNConfig(**{k: v for k, v in raw.get("ffn",{}).items()
-                                        if k in FFNConfig.__dataclass_fields__})
-            raw["norm"] = NormConfig(**{k: v for k, v in raw.get("norm",{}).items()
-                                         if k in NormConfig.__dataclass_fields__})
-            config = ModelConfig(**{k: v for k, v in raw.items()
-                                     if k in ModelConfig.__dataclass_fields__})
+
+            raw["attention"] = AttentionConfig(
+                **{
+                    k: v
+                    for k, v in raw.get("attention", {}).items()
+                    if k in AttentionConfig.__dataclass_fields__
+                }
+            )
+            raw["positional"] = PositionalConfig(
+                **{
+                    k: v
+                    for k, v in raw.get("positional", {}).items()
+                    if k in PositionalConfig.__dataclass_fields__
+                }
+            )
+            raw["ffn"] = FFNConfig(
+                **{
+                    k: v
+                    for k, v in raw.get("ffn", {}).items()
+                    if k in FFNConfig.__dataclass_fields__
+                }
+            )
+            raw["norm"] = NormConfig(
+                **{
+                    k: v
+                    for k, v in raw.get("norm", {}).items()
+                    if k in NormConfig.__dataclass_fields__
+                }
+            )
+            config = ModelConfig(
+                **{
+                    k: v
+                    for k, v in raw.items()
+                    if k in ModelConfig.__dataclass_fields__
+                }
+            )
 
         model = cls(config)
 
@@ -90,6 +142,7 @@ class BaseLM(nn.Module):
         pt = path / "pytorch_model.bin"
         if sf.exists():
             from safetensors.torch import load_file
+
             state = load_file(str(sf), device=str(map_location))
         elif pt.exists():
             state = torch.load(pt, map_location=map_location, weights_only=True)

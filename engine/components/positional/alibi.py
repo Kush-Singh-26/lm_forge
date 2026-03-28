@@ -74,18 +74,6 @@ class ALiBi(nn.Module):
         slopes = _get_alibi_slopes(num_heads)  # (H,)
         self.register_buffer("slopes", slopes)
         self._num_heads = num_heads
-        self._cached_len: int = 0
-        self.register_buffer("_bias_cache", torch.empty(0), persistent=False)
-
-    def _build(self, seq_len: int) -> None:
-        # Relative position matrix: positions[i, j] = i - j
-        # For causal models, we only care about i >= j.
-        # i - j is the distance from the query to the key.
-        device = self.slopes.device
-        pos = torch.arange(seq_len, device=device).unsqueeze(0) - torch.arange(seq_len, device=device).unsqueeze(1)
-        bias = -self.slopes.unsqueeze(-1).unsqueeze(-1) * pos.abs().float()
-        self._bias_cache = bias.unsqueeze(0)  # (1, H, S, S)
-        self._cached_len = seq_len
 
     def forward(
         self,
@@ -93,12 +81,32 @@ class ALiBi(nn.Module):
         seq_len: int,
         position_ids: Optional[torch.Tensor] = None,
     ) -> PEOutput:
-        req_len = seq_len
-        if position_ids is not None:
-            req_len = max(req_len, int(position_ids.max().item()) + 1)
-            
-        if req_len > self._cached_len:
-            self._build(max(req_len * 2, 2048))
+        """
+        Produce ALiBi bias.
+        seq_len: total length (including past)
+        """
+        B, S, _ = hidden_states.shape
+        kv_len = seq_len
+        device = hidden_states.device
+        dtype = hidden_states.dtype
 
-        bias = self._bias_cache[:, :, :req_len, :req_len].to(hidden_states.device)
+        if position_ids is None:
+            # Queries are the last S positions
+            # (1, S)
+            q_pos = torch.arange(kv_len - S, kv_len, device=device).unsqueeze(0)
+        else:
+            q_pos = position_ids  # (B, S)
+
+        # Keys are always all positions from 0 to kv_len-1
+        k_pos = torch.arange(kv_len, device=device).unsqueeze(0)  # (1, kv_len)
+
+        # Distance matrix (B, S, kv_len)
+        # ALiBi is calculated as: -(i - j).abs() * slope
+        # Optimized broadcasting to avoid large intermediates where possible
+        dist = (q_pos.unsqueeze(-1) - k_pos.unsqueeze(1)).abs()
+
+        # Apply slopes: (1, H, 1, 1) * (B, 1, S, kv_len) -> (B, H, S, kv_len)
+        # Cast to model's primary dtype early to avoid high-precision intermediates
+        bias = -self.slopes.view(1, -1, 1, 1).to(dtype) * dist.to(dtype)
+
         return PEOutput(attn_bias=bias)

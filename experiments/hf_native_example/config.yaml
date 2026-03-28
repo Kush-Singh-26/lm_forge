@@ -1,52 +1,35 @@
 # experiments/hf_native_example/config.yaml
-#
-# A clean, modern HF-native experiment example for lm_forge.
-# Uses transformers.Trainer and datasets by default.
-
 experiment:
   name: "hf_native_example"
 
 model:
-  vocab_size: 50257       # Matches GPT-2
+  vocab_size: 32000
   hidden_size: 512
   num_layers: 6
   max_seq_len: 1024
-
   attention:
     type: "gqa"
     num_heads: 8
     num_kv_heads: 2
-
   positional:
     type: "rope"
-
   ffn:
     type: "swiglu"
-    intermediate_size: 1376
-
   norm:
     type: "rms"
 
 training:
   max_steps: 1000
-  batch_size: 8
-  seq_len: 512
+  batch_size: 4
+  grad_accum: 2
   lr: 3.0e-4
-  warmup_ratio: 0.04
   dtype: "bfloat16"
-  compile: false
-  
-  # HF-specific overrides (passed to TrainingArguments)
-  hf_args:
-    report_to: ["none"]      # Set to ["wandb"] to enable W&B (requires pip install wandb)
-    run_name: "hf_native_run"
-    save_total_limit: 2
-    load_best_model_at_end: true
-    metric_for_best_model: "loss"
-    greater_is_better: false
-    logging_steps: 10
-    eval_strategy: "steps"
-    eval_steps: 100
-    save_strategy: "steps"
-    save_steps: 100
-    optim: "adamw_torch_fused"
+  save_every: 100
+  log_every: 10
+
+hub:
+  repo_id: "Kush26/lm-forge-native-test"
+  use_hub_checkpoints: true
+  checkpoint_limit: 2
+  push_every: 100
+  private: true

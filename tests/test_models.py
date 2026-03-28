@@ -137,12 +137,9 @@ class TestCausalLM:
         sd = model.state_dict()
         required = [
             "model.embed_tokens.weight",
-            "model.layers.0.self_attn.q_proj.weight",
-            "model.layers.0.self_attn.k_proj.weight",
-            "model.layers.0.self_attn.v_proj.weight",
+            "model.layers.0.self_attn.qkv_proj.weight",
             "model.layers.0.self_attn.o_proj.weight",
-            "model.layers.0.mlp.gate_proj.weight",
-            "model.layers.0.mlp.up_proj.weight",
+            "model.layers.0.mlp.gate_up_proj.weight",
             "model.layers.0.mlp.down_proj.weight",
             "model.layers.0.input_layernorm.weight",
             "model.layers.0.post_attention_layernorm.weight",
@@ -251,11 +248,11 @@ class TestMaskedLM:
         assert torch.allclose(norms, torch.ones(B), atol=1e-5)
 
     def test_peft_attn_names_accessible(self):
-        """BERT-style attention.self.q_proj path must exist."""
+        """BERT-style attention.self path must exist."""
         model = MaskedLM(_cfg(attn_type="mha", pe_type="learned"))
         layer = model.encoder.layers[0]
         assert hasattr(layer.attention, "self")
-        assert hasattr(layer.attention.self, "q_proj")
+        assert hasattr(layer.attention.self, "qkv_proj")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

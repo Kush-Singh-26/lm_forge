@@ -52,6 +52,7 @@ from engine.models.base import BaseLM
 # Single encoder layer
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class EncoderLayer(nn.Module):
     """
     Pre-norm encoder layer — same as DecoderLayer but no causal masking.
@@ -62,16 +63,20 @@ class EncoderLayer(nn.Module):
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
+
         # Wrap self_attn inside an 'attention.self' namespace so that
         # PEFT target_modules=["attention.self.q_proj"] works.
         class _AttnWrapper(nn.Module):
             def __init__(self_, cfg):
                 super().__init__()
                 self_.self = build_attention(cfg)
+
         self.attention = _AttnWrapper(cfg)
 
-        self.input_layernorm          = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
-        self.post_attention_layernorm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
+        self.input_layernorm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
+        self.post_attention_layernorm = build_norm(
+            cfg.norm.type, cfg.hidden_size, cfg.norm.eps
+        )
         self.mlp = build_ffn(cfg)
 
     @property
@@ -97,7 +102,9 @@ class EncoderLayer(nn.Module):
         hidden_states = residual + attn_out
 
         residual = hidden_states
-        hidden_states = residual + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states = residual + self.mlp(
+            self.post_attention_layernorm(hidden_states)
+        )
         return hidden_states
 
 
@@ -105,14 +112,18 @@ class EncoderLayer(nn.Module):
 # Embedding module
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class EncoderEmbeddings(nn.Module):
     """Word embeddings + optional positional embeddings for the encoder."""
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.word_embeddings = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
-        self.pe = build_pe(cfg.positional, hidden_size=cfg.hidden_size,
-                           num_heads=cfg.attention.num_heads)
+        self.pe = build_pe(
+            cfg.positional,
+            hidden_size=cfg.hidden_size,
+            num_heads=cfg.attention.num_heads,
+        )
         if hasattr(self.pe, "set_head_dim"):
             self.pe.set_head_dim(cfg.head_dim)
         self.norm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
@@ -134,12 +145,13 @@ class EncoderEmbeddings(nn.Module):
 # Trunk
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class EncoderModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.embeddings = EncoderEmbeddings(cfg)
-        self.layers     = nn.ModuleList([EncoderLayer(cfg) for _ in range(cfg.num_layers)])
-        self.norm       = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
+        self.layers = nn.ModuleList([EncoderLayer(cfg) for _ in range(cfg.num_layers)])
+        self.norm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
 
     def forward(
         self,
@@ -168,6 +180,7 @@ class EncoderModel(nn.Module):
 # MLM prediction head
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class MLMHead(nn.Module):
     """
     Standard BERT MLM head:
@@ -176,9 +189,9 @@ class MLMHead(nn.Module):
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
-        self.dense   = nn.Linear(cfg.hidden_size, cfg.hidden_size)
-        self.act     = nn.GELU()
-        self.norm    = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
+        self.dense = nn.Linear(cfg.hidden_size, cfg.hidden_size)
+        self.act = nn.GELU()
+        self.norm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
         self.decoder = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -188,6 +201,7 @@ class MLMHead(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 # Full masked LM
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class MaskedLM(BaseLM):
     """
@@ -219,12 +233,14 @@ class MaskedLM(BaseLM):
 
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__(cfg)
-        self.encoder  = EncoderModel(cfg)
+        self.encoder = EncoderModel(cfg)
         self.cls_head = MLMHead(cfg)
-        self.pooler   = nn.Linear(cfg.hidden_size, cfg.hidden_size)  # CLS pooler
+        self.pooler = nn.Linear(cfg.hidden_size, cfg.hidden_size)  # CLS pooler
 
         if cfg.tie_word_embeddings:
-            self.cls_head.decoder.weight = self.encoder.embeddings.word_embeddings.weight
+            self.cls_head.decoder.weight = (
+                self.encoder.embeddings.word_embeddings.weight
+            )
 
         self.post_init()
 
@@ -245,15 +261,19 @@ class MaskedLM(BaseLM):
             (logits, loss)  — loss is None when labels are not provided.
         """
         hidden = self.encoder(input_ids, attention_mask, position_ids)  # (B, S, D)
-        logits = self.cls_head(hidden)                                   # (B, S, V)
+        logits = self.cls_head(hidden)  # (B, S, V)
 
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
-                ignore_index=-100,
-            )
+            # Optimization: Masked indexing to skip expensive softmax on ignored tokens.
+            mask = (labels != -100).view(-1)
+            if mask.any():
+                loss = F.cross_entropy(
+                    logits.view(-1, logits.size(-1))[mask],
+                    labels.view(-1)[mask],
+                )
+            else:
+                loss = torch.tensor(0.0, device=logits.device, requires_grad=True)
         return logits, loss
 
     def encode(
@@ -276,11 +296,13 @@ class MaskedLM(BaseLM):
         hidden = self.encoder(input_ids, attention_mask)  # (B, S, D)
 
         if pool == "cls":
-            vec = torch.tanh(self.pooler(hidden[:, 0]))   # (B, D)
+            vec = torch.tanh(self.pooler(hidden[:, 0]))  # (B, D)
         elif pool == "mean":
             if attention_mask is not None:
                 mask_expanded = attention_mask.unsqueeze(-1).float()
-                vec = (hidden * mask_expanded).sum(1) / mask_expanded.sum(1).clamp(min=1e-9)
+                vec = (hidden * mask_expanded).sum(1) / mask_expanded.sum(1).clamp(
+                    min=1e-9
+                )
             else:
                 vec = hidden.mean(dim=1)
         else:

@@ -2,36 +2,11 @@
 engine/models/decoder.py
 
 Decoder-only Causal LM — assembled from registry components.
-
-The model tree is identical to LLaMA regardless of which attention / PE / FFN
-combination is chosen, because all sub-modules use the same attribute names.
-
-    CausalLM
-    ├── model                       ← DecoderModel
-    │   ├── embed_tokens
-    │   ├── pe                      ← any BasePE (rope/alibi/learned/none)
-    │   ├── layers[i]               ← DecoderLayer
-    │   │   ├── input_layernorm
-    │   │   ├── self_attn           ← any BaseAttention (mha/gqa/mqa/sliding)
-    │   │   │   ├── q_proj
-    │   │   │   ├── k_proj
-    │   │   │   ├── v_proj
-    │   │   │   └── o_proj
-    │   │   ├── post_attention_layernorm
-    │   │   └── mlp                 ← any FFN (swiglu/geglu/classic)
-    │   │       ├── gate_proj / fc1
-    │   │       ├── up_proj
-    │   │       └── down_proj / fc2
-    │   └── norm
-    └── lm_head
-
-PEFT LoRA with default LLaMA target_modules still works because projection
-names never change.
 """
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Union
 
 import torch
 import torch.nn as nn
@@ -45,37 +20,24 @@ from engine.components.ffn import build_ffn
 from engine.models.base import BaseLM
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Single layer
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class DecoderLayer(nn.Module):
-    """
-    Pre-norm transformer layer:  attn → residual → FFN → residual.
-
-    Named to match LLaMA for PEFT.
-    """
-
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
-        # Norms
         self.input_layernorm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
         self.post_attention_layernorm = build_norm(
             cfg.norm.type, cfg.hidden_size, cfg.norm.eps
         )
-        # Attention (any registered type)
         self.self_attn = build_attention(cfg)
-        # FFN (any registered type)
         self.mlp = build_ffn(cfg)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        pe_out,  # PEOutput
+        pe_out,
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Tuple] = None,
+        past_key_value: Optional[Union[Tuple, object]] = None,
         use_cache: bool = False,
+        layer_idx: Optional[int] = None,
     ) -> Tuple[torch.Tensor, Optional[Tuple]]:
         residual = hidden_states
         attn_out, present = self.self_attn(
@@ -84,6 +46,7 @@ class DecoderLayer(nn.Module):
             attention_mask=attention_mask,
             past_key_value=past_key_value,
             use_cache=use_cache,
+            layer_idx=layer_idx,
         )
         hidden_states = residual + attn_out
 
@@ -94,62 +57,85 @@ class DecoderLayer(nn.Module):
         return hidden_states, present
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Trunk (no LM head)
-# ─────────────────────────────────────────────────────────────────────────────
-
-
 class DecoderModel(nn.Module):
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__()
         self.cfg = cfg
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
-
-        # Positional encoding — shared across all layers
         self.pe = build_pe(
             cfg.positional,
             hidden_size=cfg.hidden_size,
             num_heads=cfg.attention.num_heads,
         )
-
-        # Wire head_dim into RoPE after it's been computed by ModelConfig
         if hasattr(self.pe, "set_head_dim"):
             self.pe.set_head_dim(cfg.head_dim)
 
         self.layers = nn.ModuleList([DecoderLayer(cfg) for _ in range(cfg.num_layers)])
         self.norm = build_norm(cfg.norm.type, cfg.hidden_size, cfg.norm.eps)
         self.gradient_checkpointing = False
-        self._causal_mask_cache: dict = {}
+        self._mask_cache: dict = {}
 
     def reset_cache(self) -> None:
-        """Clear cached causal masks (e.g. after device change)."""
-        self._causal_mask_cache.clear()
+        self._mask_cache.clear()
 
     def _get_causal_mask(
         self, S: int, device: torch.device, dtype: torch.dtype
     ) -> torch.Tensor:
-        """Get or build a cached causal mask."""
-        if len(self._causal_mask_cache) > 16:
-            self._causal_mask_cache.clear()
+        """
+        Returns a (S, S) causal mask (upper triangular with -inf).
+        Caches a max-length mask to avoid thrashing.
+        """
         norm_device = str(torch.device(device.type, device.index or 0))
-        key = (S, dtype, norm_device)
-        if key not in self._causal_mask_cache:
+        # Use a large enough default or the model's max_seq_len
+        max_len = max(S, self.cfg.max_seq_len)
+        key = ("causal", max_len, dtype, norm_device)
+
+        if key not in self._mask_cache:
+            # Clear if we have too many devices/dtypes cached (rare)
+            if len(self._mask_cache) > 8:
+                self._mask_cache.clear()
+
             mask = torch.full(
-                (S, S),
+                (max_len, max_len),
                 torch.finfo(dtype).min / 2,
                 device=device,
                 dtype=dtype,
             )
             mask = torch.triu(mask, diagonal=1)
-            self._causal_mask_cache[key] = mask
-        return self._causal_mask_cache[key]
+            self._mask_cache[key] = mask
+
+        return self._mask_cache[key][:S, :S]
+
+    def _get_sliding_window_mask(
+        self, S: int, kv_len: int, window: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        """
+        Returns a (S, kv_len) sliding window mask.
+        """
+        norm_device = str(torch.device(device.type, device.index or 0))
+        # Cache by kv_len and window
+        key = ("sliding", kv_len, window, dtype, norm_device)
+
+        if key not in self._mask_cache:
+            if len(self._mask_cache) > 8:
+                self._mask_cache.clear()
+
+            # Build the full kv_len x kv_len mask
+            i = torch.arange(kv_len, device=device).unsqueeze(1)
+            j = torch.arange(kv_len, device=device).unsqueeze(0)
+            in_window = (j > i - window) & (j <= i)
+            mask = torch.full(
+                (kv_len, kv_len),
+                torch.finfo(dtype).min / 2,
+                device=device,
+                dtype=dtype,
+            )
+            mask = mask.masked_fill(in_window, 0.0)
+            self._mask_cache[key] = mask
+
+        return self._mask_cache[key][-S:, :]
 
     def enable_gradient_checkpointing(self) -> None:
-        """
-        Recompute activations during backward instead of storing them.
-        Cuts peak memory ~sqrt(L) at ~33% extra compute cost.
-        Essential for training on Colab T4 with seq_len >= 512.
-        """
         self.gradient_checkpointing = True
 
     def forward(
@@ -157,67 +143,99 @@ class DecoderModel(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
-        past_key_values: Optional[list] = None,
+        past_key_values: Optional[Union[List, object]] = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[list]]:
+    ) -> Tuple[torch.Tensor, Optional[Union[List, object]]]:
         B, S = input_ids.shape
         hidden_states = self.embed_tokens(input_ids)
 
-        # ── Compute actual sequence length (including KV cache) ────────────
         kv_len = S
         if past_key_values is not None:
-            kv_len += past_key_values[0][0].shape[2]
+            if hasattr(past_key_values, "get_seq_length"):
+                kv_len = past_key_values.get_seq_length() + S
+            elif isinstance(past_key_values, list):
+                kv_len += past_key_values[0][0].shape[2]
 
-        # PE — may modify hidden_states or produce cos/sin/bias
         pe_out = self.pe(hidden_states, seq_len=kv_len, position_ids=position_ids)
         if pe_out.hidden_states is not None:
             hidden_states = pe_out.hidden_states
 
-        # ── Masking ───────────────────────────────────────────────────────
-        # Every step in SDPA needs a (B, 1, S, S) additive mask.
-        # It must combine:
-        #  1. Causal mask (if S > 1 and not incremental decoding)
-        #  2. Padding mask (if provided)
-        #  3. Positional bias (ALiBi) is added later inside the attention module
-
+        # ── Attention Masking ──────────────────────────────────────────
+        # Optimized SDPA Path: Pass None and set is_causal=True inside attention
+        # whenever we don't have padding OR ALiBi bias OR sliding window.
         additive = None
-        if S > 1 and past_key_values is None:
-            # Causal mask: upper triangle is -inf (cached for performance)
-            additive = self._get_causal_mask(
-                S, hidden_states.device, hidden_states.dtype
-            )
-            additive = additive.view(1, 1, S, S)
+        has_alibi = pe_out.attn_bias is not None
+        has_padding = attention_mask is not None
+        is_sliding = self.cfg.attention.type == "sliding"
 
-        if attention_mask is not None:
-            # Padding mask: 0 in attention_mask means -inf
-            kv_len = attention_mask.shape[-1]
-            pad_mask = (attention_mask == 0).view(B, 1, 1, kv_len)
-            fill_value = torch.finfo(hidden_states.dtype).min / 2
-            if additive is not None:
-                additive = additive.masked_fill(pad_mask, fill_value)
-            else:
-                additive = torch.zeros(
-                    B,
-                    1,
+        # 1. Determine if we need to materialize a mask.
+        # We MUST materialize if we have ALiBi (to add it later) OR if we have padding
+        # OR if we are using sliding window (since SDPA doesn't support it).
+        if has_alibi or has_padding or is_sliding:
+            if is_sliding:
+                additive = self._get_sliding_window_mask(
                     S,
+                    kv_len,
+                    self.cfg.attention.window_size,
+                    hidden_states.device,
+                    hidden_states.dtype,
+                )
+                additive = additive.view(1, 1, S, kv_len)
+            elif S > 1:
+                if past_key_values is None:
+                    additive = self._get_causal_mask(
+                        S, hidden_states.device, hidden_states.dtype
+                    )
+                    additive = additive.view(1, 1, S, S)
+                else:
+                    # (S, kv_len) mask: zeros followed by causal suffix
+                    causal_suffix = self._get_causal_mask(
+                        S, hidden_states.device, hidden_states.dtype
+                    )
+                    additive = torch.zeros(
+                        (S, kv_len),
+                        device=hidden_states.device,
+                        dtype=hidden_states.dtype,
+                    )
+                    additive[:, -S:] = causal_suffix
+                    additive = additive.view(1, 1, S, kv_len)
+            else:
+                # S = 1, just zeros (1, 1, 1, kv_len) to be filled with padding mask if needed
+                additive = torch.zeros(
+                    1,
+                    1,
+                    1,
                     kv_len,
                     device=hidden_states.device,
                     dtype=hidden_states.dtype,
                 )
-                additive = additive.masked_fill(pad_mask, fill_value)
-        # ──────────────────────────────────────────────────────────────────
 
-        presents: list = []
+            # 2. Add padding mask if present
+            if has_padding:
+                fill_value = torch.finfo(hidden_states.dtype).min / 2
+                pad_mask = (attention_mask == 0).view(B, 1, 1, kv_len)
+                # pad_mask is (B, 1, 1, kv_len), additive is (1, 1, S/1, kv_len)
+                # Broadcasting handles the batch and sequence dimension.
+                additive = additive.masked_fill(pad_mask, fill_value)
+
+        # ── Execution ──────────────────────────────────────────────────
+        presents = (
+            []
+            if (use_cache and past_key_values is None)
+            or isinstance(past_key_values, list)
+            else None
+        )
+
         for i, layer in enumerate(self.layers):
-            pkv = past_key_values[i] if past_key_values else None
+            if isinstance(past_key_values, list):
+                pkv = past_key_values[i]
+            else:
+                # Cache object or None
+                pkv = past_key_values
 
             if self.gradient_checkpointing and self.training and pkv is None:
-                # torch.utils.checkpoint rewrites the forward graph so that
-                # intermediate activations are not stored — they're recomputed
-                # during backward instead.  use_cache must be False.
-                pe_out_captured = pe_out
 
-                def _inner(hs, mask, layer=layer, pe_out_captured=pe_out_captured):
+                def _inner(hs, mask, layer=layer, pe_out_captured=pe_out):
                     out, _ = layer(
                         hs,
                         pe_out=pe_out_captured,
@@ -228,10 +246,7 @@ class DecoderModel(nn.Module):
                     return out
 
                 hidden_states = torch.utils.checkpoint.checkpoint(
-                    _inner,
-                    hidden_states,
-                    additive,
-                    use_reentrant=False,
+                    _inner, hidden_states, additive, use_reentrant=False
                 )
                 present = None
             else:
@@ -241,38 +256,27 @@ class DecoderModel(nn.Module):
                     attention_mask=additive,
                     past_key_value=pkv,
                     use_cache=use_cache,
+                    layer_idx=i,
                 )
-            if use_cache:
+            if presents is not None:
                 presents.append(present)
 
-        return self.norm(hidden_states), presents if use_cache else None
+        final_presents = presents if presents is not None else past_key_values
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Full model
-# ─────────────────────────────────────────────────────────────────────────────
+        return self.norm(hidden_states), final_presents
 
 
 class CausalLM(BaseLM):
-    """
-    Decoder-only LM.  The attention / PE / FFN types are fully determined by
-    the ModelConfig — no code changes required to switch variants.
-
-    PEFT::
-
-        lora = LoraConfig(target_modules=["q_proj", "v_proj"])  # LLaMA defaults
-        model = get_peft_model(model, lora)
-    """
-
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__(cfg)
         self.model = DecoderModel(cfg)
         self.lm_head = nn.Linear(cfg.hidden_size, cfg.vocab_size, bias=False)
-
-        if cfg.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
-
+        self.tie_weights()
         self.post_init()
+
+    def tie_weights(self) -> None:
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
 
     def forward(
         self,
@@ -280,9 +284,9 @@ class CausalLM(BaseLM):
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
-        past_key_values: Optional[list] = None,
+        past_key_values: Optional[Union[List, object]] = None,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[list]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Union[List, object]]]:
         hidden, presents = self.model(
             input_ids, attention_mask, position_ids, past_key_values, use_cache
         )
@@ -290,10 +294,8 @@ class CausalLM(BaseLM):
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-
             loss = nn.functional.cross_entropy(
                 shift_logits.view(-1, shift_logits.size(-1)),
                 shift_labels.view(-1),
@@ -312,18 +314,44 @@ class CausalLM(BaseLM):
         generator: Optional[torch.Generator] = None,
     ) -> torch.Tensor:
         self.eval()
-        past: list = []
-        for _ in range(max_new_tokens):
-            cur = input_ids if not past else input_ids[:, -1:]
+        B, S_start = input_ids.shape
+        max_total = S_start + max_new_tokens
+
+        # Pre-allocate buffer for better performance
+        # We'll fill this as we go.
+        output_ids = torch.full(
+            (B, max_total),
+            self.config.pad_token_id,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        output_ids[:, :S_start] = input_ids
+
+        past = []
+        S_curr = S_start
+
+        for i in range(max_new_tokens):
+            cur = (
+                output_ids[:, :S_curr]
+                if not past
+                else output_ids[:, S_curr - 1 : S_curr]
+            )
+
             logits, _, past = self(cur, past_key_values=past or None, use_cache=True)
             next_logits = logits[:, -1] / max(temperature, 1e-8)
+
             if top_k > 0:
                 vals, _ = torch.topk(next_logits, top_k)
                 next_logits[next_logits < vals[:, -1:]] = float("-inf")
+
             tok = torch.multinomial(
                 torch.softmax(next_logits, -1), 1, generator=generator
             )
-            input_ids = torch.cat([input_ids, tok], -1)
+
+            output_ids[:, S_curr] = tok.squeeze(-1)
+            S_curr += 1
+
             if eos_token_id is not None and (tok == eos_token_id).all():
                 break
-        return input_ids
+
+        return output_ids[:, :S_curr]

@@ -29,19 +29,23 @@ class _GatedFFN(nn.Module):
         self.act_fn = act_fn
         d, h = cfg.hidden_size, cfg.ffn.intermediate_size
 
-        # LLaMA-style names
-        self.gate_proj = nn.Linear(d, h, bias=cfg.ffn.bias)
-        self.up_proj   = nn.Linear(d, h, bias=cfg.ffn.bias)
+        # Fused gate and up projection
+        self.gate_up_proj = nn.Linear(d, 2 * h, bias=cfg.ffn.bias)
         self.down_proj = nn.Linear(h, d, bias=cfg.ffn.bias)
-        self.drop = nn.Dropout(cfg.ffn.dropout) if cfg.ffn.dropout > 0 else nn.Identity()
+        self.drop = (
+            nn.Dropout(cfg.ffn.dropout) if cfg.ffn.dropout > 0 else nn.Identity()
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.drop(self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)))
+        gate_up = self.gate_up_proj(x)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self.drop(self.down_proj(self.act_fn(gate) * up))
 
 
 @register("swiglu")
 class SwiGLUFFN(_GatedFFN):
     """SwiGLU — SiLU gate.  LLaMA / Mistral / Gemma default."""
+
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__(cfg, F.silu)
 
@@ -49,5 +53,6 @@ class SwiGLUFFN(_GatedFFN):
 @register("geglu")
 class GeGLUFFN(_GatedFFN):
     """GeGLU — GELU gate.  PaLM variant."""
+
     def __init__(self, cfg: ModelConfig) -> None:
         super().__init__(cfg, F.gelu)

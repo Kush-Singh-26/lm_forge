@@ -2,11 +2,10 @@
 engine/models/hf_model.py
 
 HFCausalLM — The primary model class for lm_forge, inheriting from HF's PreTrainedModel.
-This provides native support for the entire Hugging Face ecosystem.
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List
 
 import torch
 import torch.nn as nn
@@ -23,14 +22,15 @@ from engine.models.decoder import CausalLM
 
 class HFCausalLM(PreTrainedModel, GenerationMixin):
     """
-    Native HF-compatible model. Use this for training with HF Trainer,
-    saving/loading via .from_pretrained(), and pushing to the Hub.
+    Native HF-compatible model. Supports transformers.Cache (v5 compatible).
     """
 
     config_class = LMForgeConfig
     base_model_prefix = "lm"
     supports_gradient_checkpointing = True
     _no_split_modules = ["DecoderLayer"]
+    _tied_weights_keys = {"lm.lm_head.weight": "lm.model.embed_tokens.weight"}
+    _keys_to_ignore_on_load_missing = [r"lm\.lm_head\.weight"]
 
     def __init__(self, config: LMForgeConfig) -> None:
         super().__init__(config)
@@ -43,7 +43,7 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_values: Optional[list] = None,
+        past_key_values: Optional[Union[List, object]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
@@ -52,22 +52,17 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = (
-            return_dict
-            if return_dict is not None
-            else getattr(self.config, "use_return_dict", True)
+            return_dict if return_dict is not None else self.config.use_return_dict
         )
-        use_cache = (
-            use_cache
-            if use_cache is not None
-            else getattr(self.config, "use_cache", True)
-        )
-        # KV caching is incompatible with gradient checkpointing and wastes
-        # VRAM during training — always disable it.
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
         if self.training:
             use_cache = False
 
         if inputs_embeds is not None:
-            raise NotImplementedError("inputs_embeds is not supported. Pass input_ids.")
+            raise ValueError(
+                "inputs_embeds is not supported by lm_forge. Pass input_ids."
+            )
 
         logits, loss, presents = self.lm(
             input_ids=input_ids,
@@ -79,12 +74,12 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         )
 
         if not return_dict:
-            out = (logits,)
+            output = (logits,)
             if presents is not None:
-                out = out + (presents,)
+                output += (presents,)
             if loss is not None:
-                out = (loss,) + out
-            return out
+                output = (loss,) + output
+            return output
 
         return CausalLMOutputWithPast(
             loss=loss,
@@ -105,8 +100,7 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         self.lm.lm_head = new_embeddings
 
     def tie_weights(self, **kwargs) -> None:
-        if self.config.tie_word_embeddings:
-            self.lm.lm_head.weight = self.lm.model.embed_tokens.weight
+        self.lm.tie_weights()
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
         self.lm.model.enable_gradient_checkpointing()
@@ -115,57 +109,57 @@ class HFCausalLM(PreTrainedModel, GenerationMixin):
         self.lm.model.gradient_checkpointing = False
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        **kwargs,
     ):
-        # Convert HF's DynamicCache to legacy tuple format if needed
-        if past_key_values is not None and hasattr(past_key_values, "to_legacy_cache"):
-            try:
-                legacy_cache = past_key_values.to_legacy_cache()
-            except Exception:
-                # Cache conversion failed, treat as no cache
-                past_key_values = None
+        if past_key_values is not None:
+            if hasattr(past_key_values, "get_seq_length"):
+                past_length = past_key_values.get_seq_length()
+            elif isinstance(past_key_values, list):
+                past_length = past_key_values[0][0].shape[2]
             else:
-                # Check if cache is populated — shape check handles both None and
-                # empty tensors with shape (batch, heads, 0, head_dim) in recent transformers
-                cache_empty = all(
-                    layer_cache is None
-                    or (layer_cache[0] is None and layer_cache[1] is None)
-                    or (layer_cache[0].shape[2] == 0 and layer_cache[1].shape[2] == 0)
-                    for layer_cache in legacy_cache
-                )
-                if cache_empty:
-                    # Cache not yet populated, treat as no cache
-                    past_key_values = None
-                else:
-                    past_key_values = legacy_cache
+                past_length = past_key_values[0].shape[2]
 
-        # only last token for inputs_ids if past is defined
-        if past_key_values:
-            input_ids = input_ids[:, -1:]
+            # Only last token if past is defined
+            if input_ids.shape[1] > 1:
+                input_ids = input_ids[:, -1:]
 
-        # For generation, we retain the full attention_mask (length = kv_len)
-        # to ensure the model doesn't attend to padding tokens during decoding.
+        position_ids = kwargs.get("position_ids", None)
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past_key_values is not None:
+                position_ids = position_ids[:, -input_ids.shape[1] :]
 
         return {
             "input_ids": input_ids,
             "past_key_values": past_key_values,
             "use_cache": kwargs.get("use_cache"),
+            "position_ids": position_ids,
             "attention_mask": attention_mask,
         }
 
     def _reorder_cache(self, past_key_values, beam_idx):
-        reordered_past = []
-        for layer_past in past_key_values:
-            reordered_past.append(
-                tuple(
-                    past_state.index_select(0, beam_idx.to(past_state.device))
-                    for past_state in layer_past
+        if isinstance(past_key_values, list):
+            reordered_past = []
+            for layer_past in past_key_values:
+                reordered_past.append(
+                    tuple(
+                        past_state.index_select(0, beam_idx.to(past_state.device))
+                        for past_state in layer_past
+                    )
                 )
-            )
-        return reordered_past
+            return reordered_past
+        elif hasattr(past_key_values, "reorder_cache"):
+            return past_key_values.reorder_cache(beam_idx)
+        return past_key_values
 
     @classmethod
     def register(cls):
-        """Register with HF Auto classes for seamless AutoModel loading."""
         AutoConfig.register("lm_forge", LMForgeConfig)
         AutoModelForCausalLM.register(LMForgeConfig, cls)

@@ -1,22 +1,8 @@
 """
-experiments/pretrain_base/data_streaming.py
+engine/data/streaming.py
 
 Streaming data pipeline for pretraining on massive HF datasets.
-Handles on-the-fly tokenization and packing (concatenate-and-chunk).
-
-Supports:
-  - HuggingFaceFW/fineweb-edu  (text column: "text")
-  - bigcode/the-stack-v2        (text column: "content")
-  - Any HF IterableDataset with a text column
-
-Usage:
-    from data_streaming import build_streaming_dataset
-
-    train_ds = build_streaming_dataset(
-        dataset_name="HuggingFaceFW/fineweb-edu",
-        tokenizer=tokenizer,
-        seq_len=1024,
-    )
+Handles on-the-fly tokenization and vectorized packing (concatenate-and-chunk).
 """
 
 from __future__ import annotations
@@ -24,8 +10,8 @@ from __future__ import annotations
 import itertools
 from typing import Optional
 
+import numpy as np
 from datasets import load_dataset
-from transformers import AutoTokenizer
 
 
 # ─── Streaming Dataset Builders ─────────────────────────────────────────────
@@ -43,9 +29,7 @@ def build_streaming_dataset(
 ):
     """
     Build a tokenized, packed streaming dataset from a HF dataset.
-
-    Returns an IterableDataset that yields {"input_ids": list, "labels": list}
-    where each list has length seq_len.
+    Uses numpy for vectorized packing (much faster than Python loops).
     """
     print(f"[data] Streaming {dataset_name} (config={config_name}, split={split})...")
 
@@ -56,24 +40,17 @@ def build_streaming_dataset(
         streaming=True,
     )
 
-    # Rename content → text if needed (the-stack-v2 uses "content")
     if text_column != "text" and text_column in ds.column_names:
         ds = ds.rename_column(text_column, "text")
 
-    # Ensure "text" column exists
     if "text" not in ds.column_names:
         available = ds.column_names
-        raise ValueError(
-            f"No 'text' column found. Available: {available}. "
-            f"Set text_column= explicitly."
-        )
+        raise ValueError(f"No 'text' column found. Available: {available}.")
 
-    # Remove all non-text columns to keep things lean
     cols_to_remove = [c for c in ds.column_names if c != "text"]
     if cols_to_remove:
         ds = ds.remove_columns(cols_to_remove)
 
-    # Step 1: Tokenize (batched for speed)
     def tokenize_fn(examples):
         try:
             return tokenizer(examples["text"], add_special_tokens=False)
@@ -86,12 +63,27 @@ def build_streaming_dataset(
         remove_columns=["text"],
     )
 
-    # Step 2: Pack into seq_len chunks (concatenate-and-chunk)
+    # Step 2: Vectorized Packing
     def group_fn(examples):
-        concatenated = list(itertools.chain(*examples["input_ids"]))
-        total = (len(concatenated) // seq_len) * seq_len
-        chunks = [concatenated[i : i + seq_len] for i in range(0, total, seq_len)]
-        return {"input_ids": chunks, "labels": [c[:] for c in chunks]}
+        # Concatenate tokens across the batch using itertools (fast)
+        concatenated = {k: list(itertools.chain(*examples[k])) for k in examples.keys()}
+
+        # Get total length from first key
+        first_key = list(examples.keys())[0]
+        total_len = len(concatenated[first_key])
+
+        if total_len < seq_len:
+            return {k: [] for k in examples.keys()}
+
+        num_full = (total_len // seq_len) * seq_len
+
+        # Slice and reshape using NumPy for efficiency
+        result = {}
+        for k in concatenated.keys():
+            arr = np.array(concatenated[k])[:num_full].reshape(-1, seq_len)
+            result[k] = arr.tolist()
+
+        return result
 
     packed = tokenized.map(
         group_fn,
@@ -99,11 +91,12 @@ def build_streaming_dataset(
         batch_size=1000,
     )
 
-    # Step 3: Shuffle (buffer-based for streaming)
     if shuffle_buffer > 0:
         packed = packed.shuffle(seed=seed, buffer_size=shuffle_buffer)
 
-    print(f"[data] Streaming dataset ready (seq_len={seq_len})")
+    print(
+        f"[data] Streaming dataset ready (seq_len={seq_len}, shuffle={shuffle_buffer})"
+    )
     return packed
 
 
@@ -125,15 +118,8 @@ def build_stack_v2(
     languages: Optional[list[str]] = None,
     shuffle_buffer: int = 10000,
 ):
-    """
-    Phase 2: the-stack-v2 (code).
-
-    If languages is None, streams the full default config (all 600+ languages).
-    If languages is provided (e.g. ["Python", "JavaScript"]), concatenates
-    streams from those specific language configs.
-    """
+    """Phase 2: the-stack-v2 (code)."""
     if languages is None:
-        # Full dataset — all languages
         return build_streaming_dataset(
             dataset_name="bigcode/the-stack-v2",
             tokenizer=tokenizer,
@@ -143,14 +129,11 @@ def build_stack_v2(
             shuffle_buffer=shuffle_buffer,
         )
 
-    # Multiple language configs — interleave them
     from datasets import interleave_datasets
 
     streams = []
     for lang in languages:
-        # Language config name "C__" should be "C++" for the-stack-v2
         lang_config = "C++" if lang == "C__" else lang
-        print(f"[data]   Adding language: {lang_config}")
         try:
             ds = build_streaming_dataset(
                 dataset_name="bigcode/the-stack-v2",
@@ -168,9 +151,7 @@ def build_stack_v2(
                 f"Failed to load language config '{lang_config}': {e}. Skipping."
             )
 
-    # Interleave with uniform sampling, exhausting all streams
     combined = interleave_datasets(streams, seed=42, stopping_strategy="all_exhausted")
-    print(f"[data] Combined {len(languages)} language streams")
     return combined
 
 
@@ -178,10 +159,9 @@ def build_stack_v2(
 
 
 class SyntheticDataset:
-    """Random-token dataset for CPU smoke testing. NOT IterableDataset."""
-
     def __init__(self, n_samples: int, seq_len: int, vocab_size: int = 50257):
         import torch
+
         gen = torch.Generator().manual_seed(42)
         self.data = torch.randint(0, vocab_size, (n_samples, seq_len), generator=gen)
 
@@ -190,6 +170,7 @@ class SyntheticDataset:
 
     def __getitem__(self, idx):
         import torch
+
         ids = self.data[idx].clone()
         return {
             "input_ids": ids,

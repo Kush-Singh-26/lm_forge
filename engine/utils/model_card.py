@@ -195,6 +195,10 @@ def generate_model_card(
         "none": "—",
     }
     pe_detail = pe_detail_map.get(m.positional.type, "")
+    if m.positional.type == "rope" and m.positional.scaling_type:
+        pe_detail += (
+            f" (Scaling: {m.positional.scaling_type} @ {m.positional.factor:.1f}x)"
+        )
 
     # Eval section
     eval_section = ""

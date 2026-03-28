@@ -8,6 +8,12 @@ from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 from engine.data.collators import CLMCollator, MLMCollator
 from engine.data.hf_utils import prepare_dataset
+from engine.data.streaming import (
+    SyntheticDataset,
+    build_streaming_dataset,
+    build_fineweb_edu,
+    build_stack_v2,
+)
 
 
 def default_num_workers() -> int:
@@ -97,4 +103,8 @@ __all__ = [
     "build_dataloader",
     "prepare_dataset",
     "default_num_workers",
+    "SyntheticDataset",
+    "build_streaming_dataset",
+    "build_fineweb_edu",
+    "build_stack_v2",
 ]

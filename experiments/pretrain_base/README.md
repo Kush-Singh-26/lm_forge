@@ -82,6 +82,29 @@ Each session:
 !python experiments/pretrain_base/train.py --phase 1 --t4
 ```
 
+### Zero-Bloat Hub Checkpointing (Colab Nomad Pattern)
+
+For long pretraining runs, it's highly recommended to use the **Hub Checkpointing** system. This allows you to sync intermediate checkpoints to a dedicated `checkpoints` branch on your Hugging Face Hub repository, preventing "Git history bloat" while providing remote storage.
+
+1. Create a repository on the Hugging Face Hub (e.g., `Kush26/lm-forge-160m`).
+2. Update your `config_phase1.yaml`:
+```yaml
+hub:
+  repo_id: "your-username/your-repo-name"
+  use_hub_checkpoints: true
+  checkpoint_limit: 2
+  push_every: 1000
+```
+3. Set your `HF_TOKEN` environment variable (or use Colab Secrets).
+
+The `train.py` script will now:
+- Automatically **pull the latest checkpoint** from the Hub `checkpoints` branch at the start of a new session.
+- **Push new checkpoints** (weights + optimizer state) every `push_every` steps.
+- **Prune old checkpoints** on the Hub, keeping only the last `checkpoint_limit` (to save storage space).
+- Truly delete old blobs by using a dedicated branch that you can reset if needed.
+
+---
+
 ### Verify Phase 1
 
 After completion, check:
@@ -119,67 +142,26 @@ python experiments/pretrain_base/train.py --phase 2 \
 
 Same auto-resume behavior as Phase 1.
 
-### Verify Phase 2
-
-```bash
-ls checkpoints/pretrain_phase2/final/
-```
-
-Generation test should produce code-like output:
-```
-Prompt: def fibonacci(n):
-Output: def fibonacci(n):
-    if n <= 1:
-        return n
-    return fibonacci(n-1) + fibonacci(n-2)
-```
-
 ---
 
 ## GPU Switching (Modal → T4 or Vice Versa)
 
 No code changes needed. HF Trainer handles everything automatically.
 
-### Modal → T4
-
+### Option A: Manual (Local files)
 1. Finish your Modal session (checkpoint is saved)
-2. Copy checkpoint to Colab (or use HF Hub)
+2. Copy checkpoint to Colab (or use Drive)
 3. Run with `--t4`:
-
 ```bash
 python experiments/pretrain_base/train.py --phase 1 \
     --resume checkpoints/pretrain_phase1/checkpoint-15000 --t4
 ```
 
-**What happens automatically:**
-- Model weights loaded → cast to FP16
-- Optimizer state (Adam moments) loaded → stays in FP32
-- Scheduler state loaded → resumes at correct step
-- Fresh GradScaler created for FP16
-- Training continues seamlessly
-
-### T4 → Modal
-
-```bash
-python experiments/pretrain_base/train.py --phase 1 \
-    --resume checkpoints/pretrain_phase1/checkpoint-20000
-```
-
-- FP16 weights → cast to BF16
-- Optimizer state loaded
-- Scheduler continues
-- BF16 doesn't need GradScaler
-
-### Key Rule
-
-**Never change these between GPU switches:**
-- Model architecture (defined in config YAML — stays same)
-- Learning rate (defined in config YAML — stays same)
-- Optimizer type (AdamW — stays same)
-
-**Only change these (the `--t4` flag handles it):**
-- `batch_size` and `grad_accum` (keep effective batch constant)
-- `dtype` (BF16 ↔ FP16)
+### Option B: Automatic (Hub Checkpoints) — Recommended
+If you have **Hub Checkpoints** enabled in your YAML, you don't need to move files manually!
+1. Finish your Modal session.
+2. Open Colab and run with the same `repo_id` in your config.
+3. The script will automatically **pull the latest checkpoint** from the Hub and resume.
 
 ---
 
@@ -201,15 +183,6 @@ checkpoints/pretrain_phase1/checkpoint-1000/
 ```
 
 **Important:** `trainer_state.json` contains `global_step`. This is what tells the scheduler where to resume. Never delete it.
-
-### Checkpoint Cleanup
-
-By default, only the last 5 checkpoints are kept (`save_total_limit: 5`).
-
-To manually keep a specific checkpoint:
-```bash
-cp -r checkpoints/pretrain_phase1/checkpoint-10000 checkpoints/pretrain_phase1/keep_step10000
-```
 
 ---
 
@@ -238,22 +211,6 @@ Or use CLI:
 python experiments/pretrain_base/train.py --phase 1 --steps 10000
 ```
 
-### Use different code languages
-
-Edit `train.py` in the `get_datasets()` function:
-```python
-code_languages = ["Python", "JavaScript"]  # only these two
-```
-
-### Enable W&B logging
-
-In config YAML:
-```yaml
-training:
-  hf_args:
-    report_to: ["wandb"]
-```
-
 ---
 
 ## Monitoring
@@ -273,18 +230,6 @@ The script logs every 10 steps:
 | Phase 2 | ~2.5–3.0 | ~1.8–2.2 | Code is more structured (lower loss) |
 
 If loss plateaus above 3.5 in Phase 1, train longer.
-
-### Tokens processed
-
-Track tokens manually:
-```
-tokens_processed = global_step × batch_size × grad_accum × seq_len
-```
-
-Example at step 20,000:
-```
-20,000 × 32 × 8 × 1024 = ~5.2B tokens
-```
 
 ---
 
@@ -307,38 +252,6 @@ HF datasets streaming auto-reconnects. If it fails repeatedly:
 python experiments/pretrain_base/train.py --phase 1 --no-streaming --steps 1000
 ```
 
-### "Checkpoint not found" on resume
-
-Make sure the path is correct:
-```bash
-ls checkpoints/pretrain_phase1/
-# Find the latest checkpoint-XXXXX directory
-```
-
-### Loss spikes after GPU switch
-
-This can happen for the first ~100 steps as the optimizer adapts to new precision. It should stabilize. If it doesn't:
-- Check that effective batch size is the same
-- Ensure you didn't accidentally change the learning rate
-- Verify `trainer_state.json` has the correct `global_step`
-
-### Generation quality is poor
-
-This is expected during pretraining. The model learns structure first, coherence later. Quality improves significantly after fine-tuning (Phase 3 — PS1 data).
-
----
-
-## After Pretraining → Fine-Tuning
-
-Once both phases are complete:
-
-```bash
-# Final pretrained model location
-ls checkpoints/pretrain_phase2/final/
-```
-
-Use this as the base for PS1 fine-tuning (existing `experiments/powershell_gen/` experiment, but loading from this checkpoint instead of random init).
-
 ---
 
 ## File Overview
@@ -351,34 +264,4 @@ experiments/pretrain_base/
 ├── train.py                   # main training script
 ├── data_streaming.py          # streaming dataset builders
 └── colab_train.ipynb          # Colab T4 notebook
-```
-
----
-
-## Quick Reference
-
-```bash
-# Smoke test (CPU, 50 steps)
-python experiments/pretrain_base/train.py --phase 1 --smoke
-
-# Phase 1 (GPU)
-python experiments/pretrain_base/train.py --phase 1
-
-# Phase 1 (T4)
-python experiments/pretrain_base/train.py --phase 1 --t4
-
-# Phase 1 (quick test, 500 steps)
-python experiments/pretrain_base/train.py --phase 1 --steps 500
-
-# Phase 2 (from Phase 1 checkpoint)
-python experiments/pretrain_base/train.py --phase 2 --resume checkpoints/pretrain_phase1/final
-
-# Phase 2 (T4, from specific checkpoint)
-python experiments/pretrain_base/train.py --phase 2 --resume checkpoints/pretrain_phase1/checkpoint-20000 --t4
-
-# Custom config
-python experiments/pretrain_base/train.py --phase 1 --config my_config.yaml
-
-# Offline mode (downloads a small slice instead of streaming)
-python experiments/pretrain_base/train.py --phase 1 --no-streaming --steps 1000
 ```

@@ -15,7 +15,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from engine.config.schema import (
-    ModelConfig, AttentionConfig, PositionalConfig, FFNConfig, NormConfig,
+    ModelConfig,
+    AttentionConfig,
+    PositionalConfig,
+    FFNConfig,
+    NormConfig,
 )
 from engine.components.norm.norms import RMSNorm, LayerNorm, build_norm
 from engine.components.positional import PEOutput, build_pe
@@ -29,10 +33,12 @@ from engine.components.ffn import build_ffn
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 def _small_cfg(**overrides) -> ModelConfig:
     """Return a minimal ModelConfig for fast CPU tests."""
     defaults = dict(
-        vocab_size=256, hidden_size=64,
+        vocab_size=256,
+        hidden_size=64,
         num_layers=2,
         attention=AttentionConfig(type="gqa", num_heads=4, num_kv_heads=2),
         positional=PositionalConfig(type="rope", max_seq_len=128),
@@ -50,12 +56,13 @@ def _small_cfg(**overrides) -> ModelConfig:
     return ModelConfig(**defaults)
 
 
-B, S, D = 2, 16, 64   # batch, seq_len, hidden_size
+B, S, D = 2, 16, 64  # batch, seq_len, hidden_size
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Norm
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 class TestNorms:
     def test_rmsnorm_shape(self):
@@ -104,6 +111,7 @@ class TestNorms:
 # Positional encodings
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestRoPE:
     def setup_method(self):
         cfg = _small_cfg()
@@ -151,6 +159,22 @@ class TestRoPE:
         q_rot, k_rot = apply_rope(q, k, cos, sin)
         assert q_rot.dtype == torch.float16
 
+    def test_ntk_scaling(self):
+        cfg = _small_cfg()
+        cfg.positional.type = "rope"
+        cfg.positional.scaling_type = "ntk"
+        cfg.positional.factor = 2.0
+        pe = build_pe(cfg.positional, hidden_size=D, num_heads=4)
+        pe.set_head_dim(D // 4)
+
+        x = torch.randn(B, S, D)
+        out = pe(x, seq_len=S)
+        # Check that scaling changed the frequencies (compared to base RoPE)
+        pe_base = build_pe(PositionalConfig(type="rope"), hidden_size=D, num_heads=4)
+        pe_base.set_head_dim(D // 4)
+        out_base = pe_base(x, seq_len=S)
+        assert not torch.allclose(out.cos, out_base.cos)
+
 
 class TestALiBi:
     def test_slopes_sum_pow2(self):
@@ -180,6 +204,12 @@ class TestALiBi:
         x = torch.randn(B, S, D)
         out = pe(x, seq_len=S)
         assert out.attn_bias.shape == (1, 4, S, S)
+
+    def test_alibi_non_pow2_slopes(self):
+        slopes = _get_alibi_slopes(6)
+        assert slopes.shape == (6,)
+        # Slopes should be unique
+        assert len(torch.unique(slopes)) == 6
 
     def test_bias_causal(self):
         """Future positions should have strongly negative bias."""
@@ -232,10 +262,17 @@ class TestNoPE:
 # Attention
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestAttention:
-    @pytest.mark.parametrize("attn_type,num_kv", [
-        ("mha", 4), ("gqa", 2), ("mqa", 1), ("sliding", 2),
-    ])
+    @pytest.mark.parametrize(
+        "attn_type,num_kv",
+        [
+            ("mha", 4),
+            ("gqa", 2),
+            ("mqa", 1),
+            ("sliding", 2),
+        ],
+    )
     def test_output_shape(self, attn_type, num_kv):
         cfg = _small_cfg()
         cfg.attention.type = attn_type
@@ -293,7 +330,7 @@ class TestAttention:
         cfg.attention.type = "mha"
         cfg.__post_init__()
         attn = build_attention(cfg)
-        for name in ["q_proj", "k_proj", "v_proj", "o_proj"]:
+        for name in ["qkv_proj", "o_proj"]:
             assert hasattr(attn, name), f"Missing {name}"
 
     def test_sliding_window_restricts_context(self):
@@ -313,6 +350,7 @@ class TestAttention:
 # FFN
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 class TestFFN:
     @pytest.mark.parametrize("ffn_type", ["swiglu", "geglu", "classic"])
     def test_output_shape(self, ffn_type):
@@ -322,20 +360,19 @@ class TestFFN:
         x = torch.randn(B, S, D)
         assert ffn(x).shape == (B, S, D)
 
-    def test_swiglu_has_three_projections(self):
+    def test_swiglu_has_two_projections(self):
         cfg = _small_cfg()
         cfg.ffn.type = "swiglu"
         ffn = build_ffn(cfg)
-        assert hasattr(ffn, "gate_proj")
-        assert hasattr(ffn, "up_proj")
+        assert hasattr(ffn, "gate_up_proj")
         assert hasattr(ffn, "down_proj")
 
     def test_classic_has_peft_aliases(self):
         cfg = _small_cfg()
         cfg.ffn.type = "classic"
         ffn = build_ffn(cfg)
-        assert hasattr(ffn, "gate_proj")   # alias for fc1
-        assert hasattr(ffn, "down_proj")   # alias for fc2
+        assert hasattr(ffn, "gate_proj")  # alias for fc1
+        assert hasattr(ffn, "down_proj")  # alias for fc2
         assert ffn.gate_proj is ffn.fc1
         assert ffn.down_proj is ffn.fc2
 
@@ -346,3 +383,29 @@ class TestFFN:
             ffn = build_ffn(cfg)
             x = torch.randn(B, S, D)
             assert torch.isfinite(ffn(x)).all()
+
+
+class TestConfigs:
+    def test_rope_head_dim_even(self):
+        # Should work with default hidden=64, heads=4 (head_dim=16)
+        _small_cfg(positional=PositionalConfig(type="rope"))
+
+        # Should fail if head_dim is odd
+        with pytest.raises(AssertionError, match="must be even for RoPE"):
+            _small_cfg(
+                hidden_size=60,
+                attention=AttentionConfig(num_heads=12, num_kv_heads=4),
+                positional=PositionalConfig(type="rope"),
+            )
+
+    def test_flash_attn_alibi_incompatible(self):
+        from engine.config.schema import ExperimentConfig
+
+        cfg = ExperimentConfig()
+        cfg.model.attention.flash_attn = True
+        cfg.model.positional.type = "alibi"
+        with pytest.raises(
+            ValueError,
+            match="Flash Attention 2 does not natively support additive bias",
+        ):
+            cfg.validate()

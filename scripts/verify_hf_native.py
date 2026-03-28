@@ -28,7 +28,7 @@ def main():
     hf_cfg = LMForgeConfig(
         vocab_size=1000,
         hidden_size=128,
-        num_layers=2,
+        num_hidden_layers=2,
         max_seq_len=64,
         attention__num_heads=4,
         attention__num_kv_heads=2,
@@ -38,9 +38,12 @@ def main():
     print(f"Model initialized: {model.num_parameters():,} parameters.")
 
     print("\n--- 2. Preparing HF-native Dataset ---")
-    # Dummy data
+    # Dummy data - ensure it's long enough for seq_len=32
     raw_data = {
-        "text": ["Hello world! This is a test.", "Another sequence for training."]
+        "text": [
+            "Hello world! This is a test " * 20,
+            "Another sequence for training " * 20,
+        ]
     }
     ds = Dataset.from_dict(raw_data)
 
@@ -60,6 +63,7 @@ def main():
     print(f"First chunk keys: {packed_ds[0].keys()}")
 
     print("\n--- 3. Forward Pass & KV Cache Check ---")
+    model.eval()
     batch = torch.tensor([packed_ds[0]["input_ids"]])
     labels = torch.tensor([packed_ds[0]["labels"]])
 
@@ -73,7 +77,7 @@ def main():
 
     assert outputs.loss is not None
     assert outputs.past_key_values is not None
-    assert len(outputs.past_key_values) == hf_cfg.num_layers
+    assert len(outputs.past_key_values) == hf_cfg.num_hidden_layers
 
     print("\n--- HF-native Smoke Test PASSED! ---")
 

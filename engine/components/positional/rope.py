@@ -67,6 +67,8 @@ class RoPE(nn.Module):
     ) -> None:
         super().__init__()
         self.theta = config.theta
+        self.scaling_type = config.scaling_type
+        self.factor = config.factor
         self._head_dim: int = head_dim  # set by model after construction
         self._cached_len: int = 0
         self.register_buffer("_cos", torch.empty(0), persistent=False)
@@ -79,8 +81,17 @@ class RoPE(nn.Module):
     def _build(self, seq_len: int, device: Optional[torch.device] = None) -> None:
         if device is None:
             device = torch.device("cpu")
+
+        theta = self.theta
+        if self.scaling_type == "ntk":
+            # Dynamic NTK scaling: adjust theta based on sequence length extension
+            # Simplified static version: scale base by factor
+            theta = self.theta * (
+                self.factor ** (self._head_dim / (self._head_dim - 2))
+            )
+
         inv_freq = 1.0 / (
-            self.theta
+            theta
             ** (
                 torch.arange(0, self._head_dim, 2, dtype=torch.float32, device=device)
                 / self._head_dim
