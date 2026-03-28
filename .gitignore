@@ -67,5 +67,7 @@ events.out.tfevents.*
 # Colab
 .ipynb_checkpoints/
 
-# Lock files (optional — commit uv.lock if you want reproducible installs)
-=0.26.0
+# Lock files
+uv.lock
+pixi.lock
+package-lock.json
