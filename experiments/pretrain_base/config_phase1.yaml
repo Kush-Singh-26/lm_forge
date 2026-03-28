@@ -75,7 +75,7 @@ training:
 
 # Hub (set your repo to push checkpoints)
 hub:
-  repo_id: "your-username/lm-forge-160m"  # Update this to your HF repo!
+  repo_id: "Kush26/lm-forge-160m"  # Update this to your HF repo!
   use_hub_checkpoints: true
   checkpoint_limit: 2
   push_every: 1000
