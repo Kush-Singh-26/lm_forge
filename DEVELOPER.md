@@ -1,69 +1,45 @@
-# Developer Guide — lm_forge
+# Developer Guide — Forge
 
-Welcome to the internal engineering guide for `lm_forge`. This document explains the architecture, the registry system, and how to extend the framework.
+Welcome to the engineering guide for `Forge`. This document explains the architecture of the Nomad Training system and how to extend it.
 
-## 1. Core Architecture
+## 1. Core Philosophy: Nomad Training
 
-`lm_forge` is built on a **Registry-based Component System**. Instead of hardcoding attention or MLP implementations inside the model, we use factories to build them based on configuration.
+Forge is designed for **transient compute**. Unlike traditional training loops that assume a stable cluster, Forge assumes the trainer might be preempted, moved between providers (e.g., from Modal to Colab), or auto-scaled.
 
-### Key Components:
-- **`engine/config/schema.py`**: The "Source of Truth" for all parameters. Uses nested dataclasses that map 1:1 to YAML keys.
-- **`engine/components/`**: Modular implementations of specific layers (Attention, Norm, FFN, Positional).
-- **`engine/models/`**: The high-level model structures (`DecoderModel`, `CausalLM`, `MaskedLM`).
-- **`engine/data/`**: Streaming and memory-mapped data pipelines.
+The "Source of Truth" for state is not the local disk, but the **Hugging Face Hub** (specifically a `checkpoints` branch).
 
-## 2. The Registry System
+## 2. System Architecture
 
-Every component (e.g., a new attention mechanism) is registered using a decorator.
+### `forge/state/hub_manager.py`
+The heart of the state system. It handles:
+- **Atomic Commits**: Creating verified pointers (`latest.json`) to specific checkpoint shards.
+- **Branch Management**: Isynchronizing state to a non-default branch to keep the `main` repo clean.
+- **Shipment**: Pruning training artifacts (optimizer states) and exporting a clean model to the `main` branch.
 
-```python
-# engine/components/attention/my_new_attn.py
+### `forge/integration/hf.py` (`ForgeTrainer`)
+A subclass of the Hugging Face `Trainer`. It overrides the core loop to inject:
+- **Resumption Logic**: Automatically identifying the latest remote checkpoint before training starts.
+- **ForgeCallback**: A custom `TrainerCallback` that triggers Hub synchronization and TUI updates.
 
-@register("my_new_attn")
-class MyNewAttention(BaseAttention):
-    def __init__(self, cfg: ModelConfig):
-        super().__init__()
-        # ... implementation ...
-```
+### `forge/data/streaming.py`
+Provides utilities for `IterableDatasets` to ensure deterministic resumption. It tracks `samples_seen` cumulatively to handle batch-size adjustments without losing the data cursor.
 
-To use it, simply update your YAML config:
-```yaml
-model:
-  attention:
-    type: "my_new_attn"
-```
+### `forge/integration/prober.py`
+Contains the `MemoryProber`, which performs binary search on batch sizes if an OOM occurs, then scales `gradient_accumulation_steps` to preserve the user's target global batch size.
 
-The `build_attention(cfg)` factory will automatically find and instantiate your class.
+## 3. Extending Forge
 
-## 3. High-Performance Optimizations
+### Adding a New Provider
+To add a new compute provider (e.g., Lambda Labs, RunPod):
+1. Create a new class in `forge/providers/`.
+2. Implement the `run(script, args)` method.
+3. Register the provider in the `run` command within `forge/cli.py`.
 
-We use several strategies to maximize GPU utilization:
-- **Fused Projections**: QKV projections are fused into a single `nn.Linear` to reduce kernel launches.
-- **PyTorch Native SDPA**: Automatically selects the fastest available kernel (Flash Attention 2, Memory-Efficient, or math) for GQA, MQA, and Sliding Window.
-- **Vectorized Collators**: Data masking and padding use vectorized PyTorch operations instead of Python loops.
-- **Zero-Copy Data Prep**: Uses NumPy memory-mapping and view-based reshaping to avoid unnecessary copies.
+### Modifying the Dashboard
+The TUI is implemented in `forge/integration/dash.py` using `rich`. It reads `forge_status.json` which is updated by the `ForgeCallback` during training.
 
-## 4. Evaluation Suite
+## 4. Development Workflow
 
-Standardized evaluation is built into the CLI:
-```bash
-# Calculate Perplexity
-python main.py eval --model checkpoints/my_model --dataset wikitext --split validation
-
-# Run Zero-Shot Benchmarks
-python main.py eval --model checkpoints/my_model --tasks hellaswag,arc_easy
-```
-
-## 5. Distributed Training
-
-For training models >500M parameters, use `accelerate` with our provided FSDP config:
-```bash
-accelerate launch --config_file configs/accelerate/fsdp.yaml experiments/pretrain_base/train.py --config ...
-```
-
-## 6. Development Workflow
-
-1. **Add a component**: Register it in the appropriate `engine/components/` subdirectory.
-2. **Update Schema**: If your component needs new parameters, add them to `AttentionConfig` or `FFNConfig` in `engine/config/schema.py`.
-3. **Write a test**: Add a functional test in `tests/test_components.py`.
-4. **Benchmark**: Use `python main.py profile` to ensure no performance regression.
+1. **Local Testing**: Always run `python main.py run local --script examples/minimal_train/train.py` to verify the integration.
+2. **Resumption Testing**: Use `tests/test_forge_resumption.py` to ensure that `samples_seen` is correctly tracked across simulated crashes.
+3. **Benchmarking**: Use `forge profile` to check MFU on your current hardware before shipping changes to the training loop.

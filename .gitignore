@@ -71,3 +71,10 @@ events.out.tfevents.*
 uv.lock
 pixi.lock
 package-lock.json
+
+# Forge Artifacts
+forge_status.json
+temp_ship/
+forge.yaml
+.env
+

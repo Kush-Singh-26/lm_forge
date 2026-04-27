@@ -1,182 +1,90 @@
-# lm_forge
+# Forge: The Nomad Training Utility
 
-A modular small language model training engine with native Hugging Face support.
+Forge is a streamlined orchestrator and state-management tool designed for **Nomad Training**—the ability to seamlessly hop between local dev, serverless GPUs (Modal), and free notebook providers (Colab, Kaggle) without losing a single sample of progress.
 
-Designed for the **Colab Nomad** pattern: Colab sessions are disposable, GitHub holds the code, HuggingFace Hub holds the weights. Kill the session at any time and resume exactly where you left off.
+## Why Forge?
+
+Traditional cloud orchestrators (SkyPilot, Lightning) often stick your data in cloud buckets (S3/GCS) or persistent volumes. **Forge uses the Hugging Face Hub as your universal state backbone**, enabling zero-infrastructure resumption anywhere.
+
+### Key Capabilities
+
+*   **ForgeTrainer™**: A boilerplate-free drop-in replacement for `transformers.Trainer`.
+*   **Atomic Syncing**: Checkpoints are uploaded to a dedicated `checkpoints` branch on HF Hub and verified with a `latest.json` pointer.
+*   **Data Cursor Tracking**: Automatic stateful resumption for `IterableDatasets`. Forge calculates the exact sample skip count across different GPU counts.
+*   **Memory Prober**: Auto-tunes batch sizes to fit VRAM limits while preserving your target Global Batch Size via inverse Gradient Accumulation scaling.
+*   **Lazy Data Fetching**: Proactively redirects HF cache to local node NVMe/scratch space for maximum streaming throughput.
+*   **Multi-Provider CLI**: One-click launch on Modal or local hardware, with snippet generation for Colab, Kaggle, and SageMaker.
 
 ---
 
-## What this is
+## Quick Start
 
-A clean-room implementation of every component in a decoder-only transformer, with a plugin registry system that lets you swap attention, positional encoding, FFN, and normalisation by changing one field in a YAML config — zero code changes.
-
-**HF Native:** `lm_forge` is built around the Hugging Face ecosystem. It uses `transformers.Trainer`, `datasets.Dataset`, and `PreTrainedModel` as its primary interfaces.
-
----
-
-## Quick start
+### 1. Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/lm_forge
-cd lm_forge
-pip install -r requirements.txt
+pip install -e .
 ```
 
-**Run the HF Native training example:**
+### 2. Initialize Project
+
 ```bash
-python experiments/hf_native_example/train.py --steps 100 --cpu
+forge init --name my-gpt --repo-id your-user/my-gpt-checkpoints
 ```
 
----
+This generates a `forge.yaml` with pre-configured profiles for **Colab**, **Kaggle**, and **Modal**.
 
-## Architecture
+### 3. "Boilerplate-Free" Integration
 
-```
-lm_forge/
-├── engine/                         # the library — import this
-│   ├── config/
-│   │   ├── schema.py               # nested YAML-loadable dataclasses
-│   │   └── hf_config.py            # PretrainedConfig bridge for HF
-│   ├── components/
-│   │   ├── attention/              # mha · gqa · mqa · sliding
-│   │   ├── positional/             # rope · alibi · learned · none
-│   │   ├── ffn/                    # swiglu · geglu · classic
-│   │   └── norm/                   # rms · layer
-│   ├── models/
-│   │   ├── decoder.py              # CausalLM — core decoder model
-│   │   └── hf_model.py             # HFCausalLM — PreTrainedModel wrapper
-│   ├── data/
-│   │   ├── hf_utils.py             # prepare_dataset() — tokenize & pack
-│   │   └── collators.py            # CLMCollator · MLMCollator
-│   ├── tokenizer/
-│   │   ├── bpe.py                  # byte-level BPE from scratch
-│   │   └── hf_tokenizer.py         # HFBPETokenizer wrapper
-│   ├── utils/
-│   │   ├── hf_callbacks.py         # ProfilingCallback, HubCheckpointCallback
-│   │   ├── hub_checkpoint_utils.py # HubCheckpointManager for no-bloat sync
-│   │   └── profiler.py             # MFU, throughput measurement logic
-│   └── legacy/                     # Deprecated components (Trainer, HubSync, etc.)
-├── experiments/
-│   ├── hf_native_example/          # Recommended starting point
-│   │   ├── config.yaml             
-│   │   └── train.py                # Uses transformers.Trainer
-│   └── exp_001_gqa_rope/           # GQA + RoPE experiment
-├── scripts/
-│   └── verify_hf_native.py         # Integration smoke test
-└── tests/                          # pytest suite
-```
-
----
-
-## HF Native Workflow
-
-The recommended workflow uses Hugging Face `datasets` and `transformers.Trainer`. See **`experiments/hf_native_example/`** for a simple starting point and **`experiments/pretrain_base/`** for a complete 160M parameter pretraining pipeline.
-
-### 1. Model Configuration
-`lm_forge` uses a YAML config that maps directly to HF's `PretrainedConfig` via `LMForgeConfig`.
-
-```yaml
-model:
-  attention:
-    type: "gqa"
-  positional:
-    type: "rope"
-  ffn:
-    type: "swiglu"
-  norm:
-    type: "rms"
-```
-
-### 2. Data Preparation
-Use `prepare_dataset()` to tokenize and pack any HF dataset on-the-fly.
+Simply swap `Trainer` for `ForgeTrainer` in your script:
 
 ```python
-from engine import prepare_dataset
-from datasets import load_dataset
+from forge import ForgeTrainer
 
-raw_ds = load_dataset("roneneldan/TinyStories", split="train")
-train_ds = prepare_dataset(raw_ds, tokenizer, seq_len=1024)
-```
-
-### 3. Training
-Train using the standard `transformers.Trainer` with our native `HFCausalLM`.
-
-```python
-from engine import HFCausalLM
-from engine.utils import HubCheckpointCallback
-from transformers import Trainer
-
-model = HFCausalLM(hf_config)
-trainer = Trainer(
+trainer = ForgeTrainer(
     model=model,
     args=training_args,
-    train_dataset=train_ds,
-    callbacks=[ProfilingCallback(), HubCheckpointCallback(exp)] # MFU + Zero-Bloat Hub Sync
+    train_dataset=dataset, # IterableDatasets are auto-resumed!
+    # All Forge magic (Hub sync, Prober, Profiling) is now active
 )
 trainer.train()
 ```
 
+### 4. The Nomad Workflow
+
+**Ship to Modal:**
+```bash
+forge run modal --script train.py
+```
+
+**Move to Kaggle:**
+1. Run `forge notebook kaggle` to get your setup snippet.
+2. Paste into Kaggle. Forge will automatically `pull` the latest state from your Hub and resume.
+
+**Check Status:**
+```bash
+forge status
+```
+
 ---
 
-## The Colab Nomad Pattern (Zero Bloat)
-
-`lm_forge` is optimized for training on transient hardware (Google Colab, Modal, etc.) using a **Zero-Bloat Hub Checkpointing** strategy.
-
-### Why not standard Git?
-Traditional Git repositories are versioned. Saving a 2GB checkpoint every hour creates massive hidden history.
-
-### Our Solution
-1. **Isolated Branching**: All checkpoints are stored on a dedicated `checkpoints` branch. Your `main` branch stays 100% clean.
-2. **Mutable Storage**: The `HubCheckpointCallback` automatically deletes old checkpoints from the Hub after each successful save, keeping only the most recent $N$ (default is 2).
-3. **Automatic Resumption**: Training scripts automatically scan the `checkpoints` branch, download the latest state, and resume bit-perfectly.
-
-### Configuration
-In your `config.yaml`:
+## Advanced Config (`forge.yaml`)
 
 ```yaml
-hub:
-  repo_id: "your-username/your-repo"
-  use_hub_checkpoints: true
+name: "my-gpt"
+state:
+  repo_id: "user/repo"
+  branch: "checkpoints"
   checkpoint_limit: 2
-  push_every: 500  # Sync every N steps
+profiles:
+  colab:
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 16
+    probe_memory: true  # Auto-adjust if it OOMs
+  modal:
+    per_device_train_batch_size: 8
+    data_cache: true    # Use fast local scratch space
 ```
 
----
+## Community & Contribution
 
-## Features
-
-| Feature | Status | Notes |
-|---|---|---|
-| **HF Ecosystem** | ✅ Full | Works with `pipeline`, `AutoModel`, `PEFT/LoRA`, `Accelerate` |
-| **KV Caching** | ✅ Native | Full support for incremental decoding in `forward()` |
-| **Profiling** | ✅ Callback | `ProfilingCallback` logs MFU, tok/s, and memory to Trainer |
-| **Zero Bloat Hub** | ✅ Native | `HubCheckpointCallback` for clean, mutable checkpointing |
-| **Component Swap** | ✅ Registry | Swap attention/FFN/PE variants via YAML config |
-| **LoRA Support** | ✅ Native | Projection names mirror LLaMA for easy PEFT integration |
-
----
-
-## Legacy Components
-
-While `lm_forge` is now HF-native, the original custom components (for educational purposes or low-dependency environments) are available in `engine/legacy/`:
-- `Trainer`: Custom training loop with HubSync.
-- `MemmapDataset`: uint16 binary dataset format.
-- `HubSync`: Automated checkpoint syncing to HF Hub.
-
----
-
-## Requirements
-
-```
-torch >= 2.0.0
-transformers >= 4.46.0
-datasets >= 2.18.0
-huggingface_hub >= 0.26.0
-pyyaml >= 6.0
-```
-
----
-
-## License
-
-MIT
+Forge is built for the open-source ML community. If you have suggestions for new "Nomad Targets" or features, please open an issue!
