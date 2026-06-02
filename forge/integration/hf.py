@@ -67,11 +67,19 @@ class ForgeTrainer(Trainer):
 
         # Handle Streaming Dataset Resumption
         if "train_dataset" in kwargs and self.forge_cfg:
+            import os
             import torch.utils.data
             if isinstance(kwargs["train_dataset"], torch.utils.data.IterableDataset):
                 output_dir = kwargs["args"].output_dir if "args" in kwargs else "./outputs"
                 stats = ForgeDataHelper.get_resume_stats(output_dir)
                 skip = stats.get("samples_seen", 0)
+                
+                # Option to bypass slow dataset skipping (essential for ephemeral T4/Kaggle runs
+                # where skipping hundreds of thousands of items over network is extremely slow)
+                if os.environ.get("FORGE_NO_SKIP") == "1":
+                    print("[Forge] FORGE_NO_SKIP=1 detected. Bypassing dataset skip/fast-forwarding.")
+                    skip = 0
+                
                 if skip > 0:
                     print(f"[Forge] Resuming: skipping {skip:,} already-seen samples...")
                     # Note: SequencePacker wraps an HF IterableDataset which supports .skip()
