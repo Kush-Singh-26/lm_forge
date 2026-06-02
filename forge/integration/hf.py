@@ -14,9 +14,10 @@ from typing import Optional
 
 from transformers import Trainer, TrainerCallback, TrainingArguments, TrainerState, TrainerControl
 from forge.state.hub_manager import HubManager
-from forge.config import ForgeConfig
+from forge.config import ForgeConfig, ProfileConfig
 from forge.integration.profiler import Profiler
 from forge.data.streaming import ForgeDataHelper
+
 
 class ForgeTrainer(Trainer):
     """
@@ -29,21 +30,31 @@ class ForgeTrainer(Trainer):
         self.config_path = Path(config_path)
         self.forge_cfg: Optional[ForgeConfig] = None
         self.active_profile: Optional[ProfileConfig] = None
+        self.hub_manager: Optional[HubManager] = None  # Used by train() for Hub pull
         
         if self.config_path.exists():
             self.forge_cfg = ForgeConfig.load(self.config_path)
             env = self.forge_cfg.detect_env()
             self.active_profile = self.forge_cfg.get_active_profile()
+
+            # Create HubManager on ForgeTrainer so train() can pull checkpoints from Hub
+            try:
+                self.hub_manager = HubManager(self.forge_cfg.state, self.forge_cfg.name)
+            except Exception as e:
+                print(f"[Forge] WARNING: HubManager init failed: {e}")
             
             # Enforcement for ephemeral environments
             if env in ["colab", "kaggle"] and not os.environ.get("HF_TOKEN"):
                 print(f"[Forge] WARNING: Running in ephemeral {env} without HF_TOKEN. State will be LOST on restart!")
 
             # Apply Profile Overrides to TrainingArguments
+            _FORGE_ONLY_FIELDS = {"probe_memory", "data_cache"}
             if "args" in kwargs and isinstance(kwargs["args"], TrainingArguments):
                 if self.active_profile:
                     print(f"[Forge] Applying profile overrides for environment: {env}")
                     for key, value in self.active_profile.model_dump(exclude_none=True).items():
+                        if key in _FORGE_ONLY_FIELDS:
+                            continue  # Skip internal Forge fields
                         if hasattr(kwargs["args"], key):
                             setattr(kwargs["args"], key, value)
             
@@ -56,18 +67,24 @@ class ForgeTrainer(Trainer):
 
         # Handle Streaming Dataset Resumption
         if "train_dataset" in kwargs and self.forge_cfg:
-            from datasets import IterableDataset
-            if isinstance(kwargs["train_dataset"], IterableDataset):
+            import torch.utils.data
+            if isinstance(kwargs["train_dataset"], torch.utils.data.IterableDataset):
                 output_dir = kwargs["args"].output_dir if "args" in kwargs else "./outputs"
                 stats = ForgeDataHelper.get_resume_stats(output_dir)
                 skip = stats.get("samples_seen", 0)
                 if skip > 0:
-                    kwargs["train_dataset"] = ForgeDataHelper.prepare_streaming_dataset(
-                        kwargs["train_dataset"],
-                        rank=kwargs["args"].process_index if "args" in kwargs else 0,
-                        world_size=kwargs["args"].world_size if "args" in kwargs else 1,
-                        skip_samples=skip
-                    )
+                    print(f"[Forge] Resuming: skipping {skip:,} already-seen samples...")
+                    # Note: SequencePacker wraps an HF IterableDataset which supports .skip()
+                    inner = getattr(kwargs["train_dataset"], "dataset", None)
+                    if inner is not None and hasattr(inner, "skip"):
+                        kwargs["train_dataset"].dataset = inner.skip(skip)
+                    else:
+                        print("[Forge] WARNING: Could not fast-forward dataset — dataset type does not support .skip()")
+
+        # TRIGGER DATA CACHE if requested — must happen BEFORE super().__init__() so
+        # HF_HOME is redirected before the Trainer initializes any dataset caches.
+        if self.active_profile and self.active_profile.data_cache:
+            ForgeDataHelper.setup_fast_cache()
 
         super().__init__(*args, **kwargs)
 
@@ -90,32 +107,49 @@ class ForgeTrainer(Trainer):
             self.args.per_device_train_batch_size = new_per_device
             self.args.gradient_accumulation_steps = new_accum
 
-        # TRIGGER DATA CACHE if requested
-        if self.active_profile and self.active_profile.data_cache:
-            ForgeDataHelper.setup_fast_cache()
-
 
     def train(self, *args, resume_from_checkpoint: Optional[str | bool] = None, **kwargs):
         """
-        Overridden train to automatically detect and resume from the latest local checkpoint.
+        Overridden train to automatically detect and resume from the latest checkpoint.
+
+        Resume priority:
+          1. Explicit checkpoint path passed by caller
+          2. Local checkpoint in output_dir (works on Modal where disk persists across calls)
+          3. Hub checkpoint (critical for Kaggle: local disk is empty on every session start)
         """
         if resume_from_checkpoint is None:
             output_dir = Path(self.args.output_dir)
+
+            # --- Priority 2: local checkpoint ---
             if output_dir.exists():
-                # Find the highest checkpoint step
                 checkpoints = []
                 for item in output_dir.iterdir():
                     if item.is_dir() and "checkpoint-" in item.name:
                         step_str = item.name.split("checkpoint-")[-1]
                         if step_str.isdigit():
                             checkpoints.append((int(step_str), item))
-                
+
                 if checkpoints:
                     latest_checkpoint = sorted(checkpoints, key=lambda x: x[0])[-1][1]
-                    print(f"[Forge] Auto-detect: Resuming from {latest_checkpoint.name}")
+                    print(f"[Forge] Auto-detect: Resuming from local {latest_checkpoint.name}")
                     resume_from_checkpoint = str(latest_checkpoint)
 
+            # --- Priority 3: Hub checkpoint (Kaggle / fresh machine) ---
+            if resume_from_checkpoint is None and self.hub_manager is not None:
+                print("[Forge] No local checkpoint found. Checking Hub for latest checkpoint...")
+                try:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    pulled = self.hub_manager.pull_latest(output_dir)
+                    if pulled is not None:
+                        print(f"[Forge] Pulled checkpoint from Hub: {pulled.name}")
+                        resume_from_checkpoint = str(pulled)
+                    else:
+                        print("[Forge] No Hub checkpoint found. Starting fresh training.")
+                except Exception as e:
+                    print(f"[Forge] WARNING: Hub pull failed ({e}). Starting fresh.")
+
         return super().train(*args, resume_from_checkpoint=resume_from_checkpoint, **kwargs)
+
 
 class ForgeCallback(TrainerCallback):
     """
