@@ -120,7 +120,38 @@ class ForgeTrainer(Trainer):
         if resume_from_checkpoint is None:
             output_dir = Path(self.args.output_dir)
 
-            # --- Priority 2: local checkpoint ---
+            import torch.distributed as dist
+            is_dist = dist.is_initialized()
+            rank = dist.get_rank() if is_dist else 0
+
+            # --- Rank 0 pulls from Hub if no local checkpoint exists ---
+            if rank == 0:
+                has_local = False
+                if output_dir.exists():
+                    for item in output_dir.iterdir():
+                        if item.is_dir() and "checkpoint-" in item.name:
+                            step_str = item.name.split("checkpoint-")[-1]
+                            if step_str.isdigit():
+                                has_local = True
+                                break
+                
+                if not has_local and self.hub_manager is not None:
+                    print("[Forge] Rank 0: No local checkpoint found. Checking Hub for latest checkpoint...")
+                    try:
+                        output_dir.mkdir(parents=True, exist_ok=True)
+                        pulled = self.hub_manager.pull_latest(output_dir)
+                        if pulled is not None:
+                            print(f"[Forge] Rank 0: Pulled checkpoint from Hub: {pulled.name}")
+                        else:
+                            print("[Forge] Rank 0: No Hub checkpoint found. Starting fresh training.")
+                    except Exception as e:
+                        print(f"[Forge] Rank 0: WARNING: Hub pull failed ({e}). Starting fresh.")
+
+            # --- Synchronize all processes to wait for Rank 0 download completion ---
+            if is_dist:
+                dist.barrier()
+
+            # --- All ranks detect the local checkpoint (including the one Rank 0 just downloaded) ---
             if output_dir.exists():
                 checkpoints = []
                 for item in output_dir.iterdir():
@@ -131,22 +162,8 @@ class ForgeTrainer(Trainer):
 
                 if checkpoints:
                     latest_checkpoint = sorted(checkpoints, key=lambda x: x[0])[-1][1]
-                    print(f"[Forge] Auto-detect: Resuming from local {latest_checkpoint.name}")
+                    print(f"[Forge] Rank {rank} Auto-detect: Resuming from local {latest_checkpoint.name}")
                     resume_from_checkpoint = str(latest_checkpoint)
-
-            # --- Priority 3: Hub checkpoint (Kaggle / fresh machine) ---
-            if resume_from_checkpoint is None and self.hub_manager is not None:
-                print("[Forge] No local checkpoint found. Checking Hub for latest checkpoint...")
-                try:
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    pulled = self.hub_manager.pull_latest(output_dir)
-                    if pulled is not None:
-                        print(f"[Forge] Pulled checkpoint from Hub: {pulled.name}")
-                        resume_from_checkpoint = str(pulled)
-                    else:
-                        print("[Forge] No Hub checkpoint found. Starting fresh training.")
-                except Exception as e:
-                    print(f"[Forge] WARNING: Hub pull failed ({e}). Starting fresh.")
 
         return super().train(*args, resume_from_checkpoint=resume_from_checkpoint, **kwargs)
 
