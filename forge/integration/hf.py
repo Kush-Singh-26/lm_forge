@@ -67,7 +67,6 @@ class ForgeTrainer(Trainer):
 
         # Handle Streaming Dataset Resumption
         if "train_dataset" in kwargs and self.forge_cfg:
-            import os
             import torch.utils.data
             if isinstance(kwargs["train_dataset"], torch.utils.data.IterableDataset):
                 output_dir = kwargs["args"].output_dir if "args" in kwargs else "./outputs"
