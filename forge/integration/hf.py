@@ -124,6 +124,13 @@ class ForgeTrainer(Trainer):
           2. Local checkpoint in output_dir (works on Modal where disk persists across calls)
           3. Hub checkpoint (critical for Kaggle: local disk is empty on every session start)
         """
+        # Force the active profile/arg batch size to prevent Trainer starting with incorrect values
+        target_bs = self.args.per_device_train_batch_size
+        if self.active_profile and self.active_profile.per_device_train_batch_size is not None:
+            target_bs = self.active_profile.per_device_train_batch_size
+        self.args.per_device_train_batch_size = target_bs
+        self._train_batch_size = target_bs * max(1, self.args.n_gpu)
+
         if resume_from_checkpoint is None:
             output_dir = Path(self.args.output_dir)
 
@@ -173,6 +180,31 @@ class ForgeTrainer(Trainer):
                     resume_from_checkpoint = str(latest_checkpoint)
 
         return super().train(*args, resume_from_checkpoint=resume_from_checkpoint, **kwargs)
+
+    def get_train_dataloader(self):
+        """
+        Enforce the batch size config from the active profile or args,
+        preventing Transformers Trainer from restoring/overriding it during resume.
+        """
+        target_bs = self.args.per_device_train_batch_size
+        if self.active_profile and self.active_profile.per_device_train_batch_size is not None:
+            target_bs = self.active_profile.per_device_train_batch_size
+
+        self.args.per_device_train_batch_size = target_bs
+        self._train_batch_size = target_bs * max(1, self.args.n_gpu)
+        if hasattr(self, "state") and self.state is not None:
+            self.state.train_batch_size = self._train_batch_size
+
+        return super().get_train_dataloader()
+
+    def _init_training_state(self, *args, **kwargs):
+        epochs_trained, steps_trained = super()._init_training_state(*args, **kwargs)
+        if self.state is not None:
+            target_bs = self.args.per_device_train_batch_size
+            if self.active_profile and self.active_profile.per_device_train_batch_size is not None:
+                target_bs = self.active_profile.per_device_train_batch_size
+            self.state.train_batch_size = target_bs * max(1, self.args.n_gpu)
+        return epochs_trained, steps_trained
 
 
 class ForgeCallback(TrainerCallback):
