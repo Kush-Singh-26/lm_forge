@@ -104,6 +104,8 @@ def pull(
         raise typer.Exit(1)
         
     cfg = ForgeConfig.load(config)
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(config).parent / ".env")
     from forge.state.hub_manager import HubManager
     hub = HubManager(cfg.state, cfg.name)
     
@@ -115,18 +117,23 @@ def pull(
         typer.echo("No remote checkpoints to pull.")
 
 @app.command()
-def ship(config: str = typer.Option("forge.yaml", help="Path to forge.yaml")):
+def ship(
+    config: str = typer.Option("forge.yaml", help="Path to forge.yaml"),
+    target_repo: Optional[str] = typer.Option(None, "--target-repo", help="HF Hub Repo ID to ship to (default: same repo main branch)"),
+):
     """Prunes and exports the latest verified checkpoint to the Hub 'main' branch."""
     if not Path(config).exists():
         typer.echo(f"❌ Error: {config} not found.")
         raise typer.Exit(1)
         
     cfg = ForgeConfig.load(config)
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(config).parent / ".env")
     from forge.state.hub_manager import HubManager
     hub = HubManager(cfg.state, cfg.name)
     
     typer.echo(f"🚀 Shipping latest verified checkpoint for {cfg.name}...")
-    url = hub.ship_model("temp_ship")
+    url = hub.ship_model("temp_ship", target_repo_id=target_repo)
     if url:
         typer.echo(f"✅ Model shipped to main branch: {url}")
     else:
@@ -182,6 +189,8 @@ def status(config: str = "forge.yaml"):
         raise typer.Exit(1)
         
     cfg = ForgeConfig.load(config)
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=Path(config).parent / ".env")
     from forge.state.hub_manager import HubManager
     hub = HubManager(cfg.state, cfg.name)
     

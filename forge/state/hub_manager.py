@@ -169,10 +169,20 @@ class HubManager:
         has_model = (local_dir / "model.safetensors").exists() or (local_dir / "pytorch_model.bin").exists() or (local_dir / "model.bin").exists()
         return has_model
 
-    def ship_model(self, local_root: str | Path) -> Optional[str]:
+    def ship_model(self, local_root: str | Path, target_repo_id: Optional[str] = None) -> Optional[str]:
         """
         Takes the latest checkpoint, prunes it, and pushes to 'main' branch.
+        If target_repo_id is provided, ships to that repo instead of self.repo_id.
         """
+        dest_repo = target_repo_id or self.repo_id
+
+        # Ensure destination repo exists
+        if target_repo_id:
+            try:
+                self.api.create_repo(repo_id=dest_repo, exist_ok=True, private=self.cfg.private)
+            except Exception as e:
+                print(f"[Forge.Hub] WARNING: Repo creation check failed: {e}")
+
         latest_verified = self.get_latest_verified_step()
         if latest_verified is None:
             # Fallback to listing if pointer is missing
@@ -208,15 +218,15 @@ class HubManager:
                 f.write(readme_content)
 
             # 4. Upload to main branch
-            print(f"[Forge.Hub] Uploading pruned model to '{self.repo_id}' [main]...")
+            print(f"[Forge.Hub] Uploading pruned model to '{dest_repo}' [main]...")
             self.api.upload_folder(
-                repo_id=self.repo_id,
+                repo_id=dest_repo,
                 folder_path=str(checkpoint_path),
                 path_in_repo=".",
                 commit_message=f"Ship model from checkpoint-{latest_verified} via Forge",
                 revision="main"
             )
-            return f"https://huggingface.co/{self.repo_id}"
+            return f"https://huggingface.co/{dest_repo}"
 
     def _generate_readme(self, metadata_file: Path) -> str:
         """Generates a basic Model Card from Forge metadata."""
